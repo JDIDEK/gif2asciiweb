@@ -16,10 +16,14 @@ pub struct AsciiPixel {
 
 #[wasm_bindgen]
 pub fn process_gif_to_ascii_color(image_bytes: &[u8], target_width: u32) -> Result<JsValue, JsError> {
+    if image_bytes.len() < 6 || !(&image_bytes[0..3] == b"GIF") {
+        return Err(JsError::new("Le fichier n'est pas un GIF valide (Header manquant)"));
+    }
+
     let cursor = Cursor::new(image_bytes);
     
     let decoder = GifDecoder::new(cursor)
-        .map_err(|e| JsError::new(&format!("Erreur décodeur GIF: {}", e)))?;
+        .map_err(|_| JsError::new("Impossible de décoder le GIF. Vérifiez le format."))?;
 
     let frames = decoder.into_frames()
         .collect_frames()

@@ -1,94 +1,81 @@
-import React, { useState, useEffect, ChangeEvent } from 'react';
+import React, { useState, useEffect } from 'react';
+import type { ChangeEvent } from 'react';
 import init, { process_image_to_ascii, process_gif_to_ascii_color } from "wasm-core";
-
-// On définit l'interface pour correspondre à la struct Rust
-interface AsciiPixel {
-  character: string;
-  red: number;
-  green: number;
-  blue: number;
-}
+import type { AsciiPixel } from './types/ascii';
+import { AsciiViewer } from './components/AsciiViewer';
 
 const App: React.FC = () => {
-  const [staticAscii, setStaticAscii] = useState<string>("");
   const [gifFrames, setGifFrames] = useState<AsciiPixel[][]>([]);
-  const [currentFrame, setCurrentFrame] = useState<number>(0);
-  const [width, setWidth] = useState<number>(100);
-  const [isWasmLoaded, setIsWasmLoaded] = useState<boolean>(false);
-  const [mode, setMode] = useState<'static' | 'gif' | null>(null);
+  const [staticAscii, setStaticAscii] = useState<string>("");
+  const [currentFrame, setCurrentFrame] = useState(0);
+  const [width, setWidth] = useState(100);
+  const [isDarkMode, setIsDarkMode] = useState(true);
+  const [isLoading, setIsLoading] = useState(false);
+
+  useEffect(() => { init(); }, []);
 
   useEffect(() => {
-    init().then(() => setIsWasmLoaded(true));
-  }, []);
-
-  // Animation pour les GIFs
-  useEffect(() => {
-    if (mode === 'gif' && gifFrames.length > 0) {
+    if (gifFrames.length > 0) {
       const interval = setInterval(() => {
         setCurrentFrame((prev) => (prev + 1) % gifFrames.length);
       }, 100);
       return () => clearInterval(interval);
     }
-  }, [mode, gifFrames]);
+  }, [gifFrames.length]);
 
   const handleFile = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file || !isWasmLoaded) return;
+    if (!file) return;
+
+    setGifFrames([]);
+    setStaticAscii("");
+    setCurrentFrame(0);
+    setIsLoading(true);
 
     const bytes = new Uint8Array(await file.arrayBuffer());
-
     try {
       if (file.type === "image/gif") {
         const result = await process_gif_to_ascii_color(bytes, width);
         setGifFrames(result as AsciiPixel[][]);
-        setMode('gif');
-        setCurrentFrame(0);
       } else {
         const result = await process_image_to_ascii(bytes, width);
         setStaticAscii(result);
-        setMode('static');
       }
     } catch (err) {
-      console.error(err);
+      console.error("Erreur WASM:", err);
+    } finally {
+      setIsLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-white p-12">
-      <header className="mb-12 text-center">
-        <h1 className="text-5xl font-black text-orange-500 tracking-tighter">FIG2TIG</h1>
-        <p className="text-zinc-500 font-mono text-sm uppercase mt-2">Structured Data Edition</p>
-      </header>
+    <div className={`min-h-screen transition-colors ${isDarkMode ? 'bg-zinc-950 text-white' : 'bg-zinc-50 text-zinc-900'}`}>
+      <div className="max-w-5xl mx-auto p-8">
+        <header className="flex justify-between items-center mb-12">
+          <h1 className="text-4xl font-black tracking-tighter text-orange-500">FIG2TIG</h1>
+          <button onClick={() => setIsDarkMode(!isDarkMode)} className="p-2 border rounded-lg text-xs font-bold">
+            {isDarkMode ? '🌙 DARK' : '☀️ LIGHT'}
+          </button>
+        </header>
 
-      <div className="max-w-4xl mx-auto space-y-8">
-        <div className="flex gap-4 items-center bg-zinc-900 p-6 rounded-2xl border border-zinc-800">
-          <input type="file" onChange={handleFile} accept="image/*" className="flex-1" />
-          <div className="flex flex-col">
-             <span className="text-[10px] font-bold text-zinc-500 uppercase">Width: {width}</span>
-             <input type="range" min="40" max="150" value={width} onChange={(e) => setWidth(parseInt(e.target.value))} />
+        <div className={`p-6 rounded-2xl border mb-8 ${isDarkMode ? 'bg-zinc-900 border-zinc-800' : 'bg-white border-zinc-200'}`}>
+          <div className="flex flex-col md:flex-row gap-6 items-center">
+            <input type="file" onChange={handleFile} className="text-sm" />
+            <div className="flex-1 w-full">
+              <label className="text-[10px] uppercase opacity-50 font-bold">Width: {width}px</label>
+              <input type="range" min="40" max="150" value={width} onChange={(e) => setWidth(parseInt(e.target.value))} className="w-full accent-orange-500" />
+            </div>
           </div>
         </div>
 
-        <div className="bg-black border border-zinc-800 rounded-xl p-8 overflow-hidden flex justify-center">
-          {mode === 'static' && (
-            <pre className="font-mono text-[6px] leading-[5px] text-white">
-              {staticAscii}
-            </pre>
-          )}
-
-          {mode === 'gif' && gifFrames.length > 0 && (
-            <pre className="font-mono text-[6px] leading-[5px] whitespace-pre">
-              {/* On map sur les pixels de la frame actuelle */}
-              {gifFrames[currentFrame].map((pixel, i) => (
-                <React.Fragment key={i}>
-                  <span style={{ color: `rgb(${pixel.red},${pixel.green},${pixel.blue})` }}>
-                    {pixel.character}
-                  </span>
-                  {/* On ajoute un retour à la ligne tous les 'width' pixels */}
-                  {(i + 1) % width === 0 && "\n"}
-                </React.Fragment>
-              ))}
-            </pre>
+        <div className={`rounded-xl p-8 overflow-hidden min-h-[300px] flex items-center justify-center border ${isDarkMode ? 'bg-black border-zinc-800' : 'bg-zinc-100 border-zinc-200'}`}>
+          {isLoading ? (
+            <div className="animate-pulse font-mono text-zinc-500 uppercase text-xs">Processing via Rust...</div>
+          ) : (
+            <>
+              {staticAscii && <pre className="font-mono text-[6px] leading-[5px]">{staticAscii}</pre>}
+              <AsciiViewer frames={gifFrames} currentFrame={currentFrame} width={width} isDarkMode={isDarkMode} />
+            </>
           )}
         </div>
       </div>
