@@ -1,0 +1,13 @@
+# Rust
+wasm-core/target/
+wasm-core/pkg/
+
+# Node / Bun
+node_modules/
+frontend/dist/
+frontend/.env
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
