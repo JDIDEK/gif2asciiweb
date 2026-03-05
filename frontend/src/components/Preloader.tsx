@@ -64,18 +64,6 @@ export const Preloader: React.FC<Props> = ({ isLoaded }) => {
               </motion.div>
             </div>
           </div>
-
-          <div className="overflow-hidden mt-12">
-            <motion.p
-              initial={{ y: "100%", opacity: 0 }}
-              animate={{ y: "0%", opacity: 1 }}
-              transition={{ duration: 1, ease: customEase, delay: 0.8 }}
-              className="text-zinc-600 font-mono text-[10px] uppercase tracking-[0.3em] flex items-center gap-4"
-            >
-              <span className="w-1.5 h-1.5 rounded-full bg-orange-500 animate-pulse" />
-              Initializing WASM Engine
-            </motion.p>
-          </div>
         </motion.div>
       )}
     </AnimatePresence>
