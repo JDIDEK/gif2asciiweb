@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from 'react';
+import { useReducedMotion } from 'motion/react';
 import type { PackedAsciiAnimation } from '../types/ascii';
 
 interface Props {
@@ -47,6 +48,7 @@ function drawAsciiFrame(
 }
 
 export const AsciiViewer: React.FC<Props> = ({ animation, isDarkMode, frameDelayMs = 100 }) => {
+  const shouldReduceMotion = useReducedMotion();
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -83,22 +85,24 @@ export const AsciiViewer: React.FC<Props> = ({ animation, isDarkMode, frameDelay
       rafId = requestAnimationFrame(tick);
     };
 
-    if (animation.frameCount > 1) {
+    if (!shouldReduceMotion && animation.frameCount > 1) {
       rafId = requestAnimationFrame(tick);
     }
 
     return () => {
       if (rafId) cancelAnimationFrame(rafId);
     };
-  }, [animation, isDarkMode, frameDelayMs]);
+  }, [animation, frameDelayMs, isDarkMode, shouldReduceMotion]);
 
   if (!animation || animation.frameCount === 0) return null;
 
   return (
-    <div className="flex justify-center items-center w-full h-full overflow-hidden">
+    <div className="flex h-full w-full items-center justify-center overflow-hidden">
       <canvas
         ref={canvasRef}
-        className="max-w-full rounded shadow-lg border border-zinc-800/50 min-h-50"
+        role="img"
+        aria-label={animation.frameCount > 1 ? 'Animated ASCII Preview' : 'ASCII Preview'}
+        className="min-h-50 max-w-full rounded border border-zinc-800/50 shadow-lg"
         style={{
           imageRendering: 'pixelated',
           height: 'auto'

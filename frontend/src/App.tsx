@@ -1,14 +1,15 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useId, useState } from 'react';
 import type { ChangeEvent } from 'react';
 import init, { process_gif_to_ascii_color, process_image_to_ascii } from 'wasm-core';
 import type { PackedAsciiAnimation } from './types/ascii';
 
 // --- Composants ---
 import { AsciiViewer } from './components/AsciiViewer';
-import { Preloader, customEase } from './components/Preloader';
+import { Preloader } from './components/Preloader';
+import { customEase } from './lib/motion';
 
 // --- UI & Icônes ---
-import { motion, AnimatePresence } from 'motion/react';
+import { motion, AnimatePresence, useReducedMotion } from 'motion/react';
 import { Upload, Download, Settings2, Sparkles } from 'lucide-react';
 
 const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024;
@@ -19,6 +20,7 @@ const FONT_SIZE = 10;
 const CHAR_WIDTH = 6;
 const CHAR_HEIGHT = 10;
 const CHAR_CACHE = Array.from({ length: 256 }, (_, index) => String.fromCharCode(index));
+const PRELOADER_MIN_MS = 900;
 
 type ExportWorkerRequest =
   | { type: 'start'; width: number; height: number }
@@ -112,6 +114,10 @@ function drawPackedAsciiFrame(
 }
 
 const App: React.FC = () => {
+  const shouldReduceMotion = useReducedMotion();
+  const uploadInputId = useId();
+  const widthInputId = useId();
+  const statusRegionId = useId();
   const [gifAnimation, setGifAnimation] = useState<PackedAsciiAnimation | null>(null);
   const [staticAscii, setStaticAscii] = useState('');
   const [width, setWidth] = useState(100);
@@ -125,42 +131,52 @@ const App: React.FC = () => {
 
   useEffect(() => {
     let mounted = true;
-    
-    // Délai de 3 secondes pour laisser l'animation du preloader s'afficher
-    const timer = setTimeout(() => {
-      if (mounted) setAppLoaded(true);
-    }, 3000);
+    let timerId = 0;
 
-    init()
-      .then(() => {
-        if (mounted) setIsWasmReady(true);
-      })
-      .catch((err) => {
-        console.error('Erreur init WASM:', err);
-        if (mounted) setErrorMessage('Initialisation WASM impossible');
+    const bootstrap = async () => {
+      const minDelay = new Promise<void>((resolve) => {
+        timerId = window.setTimeout(resolve, shouldReduceMotion ? 0 : PRELOADER_MIN_MS);
       });
+
+      try {
+        await init();
+        if (mounted) setIsWasmReady(true);
+      } catch (err) {
+        console.error('Erreur init WASM:', err);
+        if (mounted) {
+          setErrorMessage('Initialisation WASM impossible. Recharge la page puis réessaie.');
+        }
+      } finally {
+        await minDelay;
+        if (mounted) setAppLoaded(true);
+      }
+    };
+
+    void bootstrap();
 
     return () => {
       mounted = false;
-      clearTimeout(timer);
+      clearTimeout(timerId);
     };
-  }, []);
+  }, [shouldReduceMotion]);
 
   const handleFile = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    e.target.value = '';
+
     setErrorMessage(null);
     if (!isWasmReady) {
-      setErrorMessage('Le moteur WASM n’est pas encore prêt.');
+      setErrorMessage('Le moteur WASM n’est pas encore prêt. Patiente un instant puis réessaie.');
       return;
     }
     if (!ALLOWED_MIME_TYPES.has(file.type)) {
-      setErrorMessage('Type de fichier non supporté.');
+      setErrorMessage('Type de fichier non supporté. Utilise un GIF, PNG, JPEG ou WebP.');
       return;
     }
     if (file.size > MAX_FILE_SIZE_BYTES) {
-      setErrorMessage('Fichier trop volumineux (max 20MB).');
+      setErrorMessage('Fichier trop volumineux. Limite: 20 MB.');
       return;
     }
 
@@ -173,7 +189,7 @@ const App: React.FC = () => {
       const sourcePixels = bitmap.width * bitmap.height;
       bitmap.close();
       if (sourcePixels > MAX_SOURCE_PIXELS) {
-        throw new Error('Image trop grande (limite pixels dépassée)');
+        throw new Error('Image trop grande. Réduis ses dimensions avant l’import.');
       }
 
       const bytes = new Uint8Array(await file.arrayBuffer());
@@ -194,7 +210,11 @@ const App: React.FC = () => {
   };
 
   const handleExport = async () => {
-    if (!gifAnimation || isExporting) return;
+    if (isExporting) return;
+    if (!gifAnimation) {
+      setErrorMessage('L’export GIF est disponible uniquement après l’import d’un GIF animé.');
+      return;
+    }
 
     setErrorMessage(null);
     setIsExporting(true);
@@ -266,86 +286,131 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-black text-zinc-100 font-sans selection:bg-orange-500 selection:text-white bg-grain overflow-hidden">
-      
+    <div className="min-h-screen overflow-x-hidden bg-black text-zinc-100 font-sans selection:bg-orange-500 selection:text-white bg-grain">
+      <a
+        href="#main-content"
+        className="sr-only z-50 rounded-full bg-white px-4 py-2 text-sm font-semibold text-black focus:not-sr-only focus:fixed focus:left-4 focus:top-4"
+      >
+        Skip to Main Content
+      </a>
+
       {/* 1. THE AWWARDS PRELOADER */}
       <Preloader isLoaded={appLoaded} />
 
       {/* 2. THE MAIN LAYOUT */}
-      <main className="h-screen w-full flex flex-col lg:flex-row p-4 md:p-8 gap-8 relative z-10">
+      <main
+        id="main-content"
+        className="relative z-10 flex min-h-screen w-full flex-col gap-8 p-4 md:p-8 lg:h-screen lg:flex-row"
+      >
         
         {/* COLONNE GAUCHE: Contrôles & Typo */}
         <motion.div 
-          initial={{ opacity: 0, x: -50 }}
+          initial={shouldReduceMotion ? false : { opacity: 0, x: -50 }}
           animate={appLoaded ? { opacity: 1, x: 0 } : {}}
-          transition={{ duration: 1.2, ease: customEase, delay: 0.4 }}
-          className="flex-1 flex flex-col justify-between"
+          transition={{ duration: shouldReduceMotion ? 0.2 : 1.2, ease: customEase, delay: shouldReduceMotion ? 0 : 0.4 }}
+          className="flex flex-1 flex-col justify-between"
         >
           <header className="pt-4">
-            <h1 className="text-6xl md:text-[5.5rem] font-black tracking-tighter leading-[0.85] text-white">
+            <h1 className="text-6xl font-black leading-[0.85] tracking-tighter text-white md:text-[5.5rem]">
               ASCII <br/> 
               <span className="text-orange-500 italic font-serif font-light tracking-normal">Masterpiece.</span>
             </h1>
-            <p className="mt-8 text-zinc-500 font-mono text-xs max-w-sm uppercase leading-relaxed">
+            <p className="mt-8 max-w-sm text-xs uppercase leading-relaxed text-zinc-500 font-mono">
               High-performance WebAssembly engine. <br/> converting pixels into typography at 60fps.
             </p>
           </header>
 
           <div className="space-y-6 mt-12 lg:mt-0 pb-4">
             {/* Panneau de configuration */}
-            <div className="group relative border border-zinc-800/80 bg-zinc-900/30 backdrop-blur-md rounded-2xl p-6 transition-all hover:border-zinc-700 hover:bg-zinc-900/50">
+            <div className="group relative rounded-2xl border border-zinc-800/80 bg-zinc-900/30 p-6 backdrop-blur-md transition-colors hover:border-zinc-700 hover:bg-zinc-900/50">
               <div className="flex items-center gap-3 mb-8">
-                <Settings2 className="w-4 h-4 text-orange-500" />
+                <Settings2 aria-hidden="true" className="h-4 w-4 text-orange-500" />
                 <h3 className="text-[10px] uppercase font-bold tracking-widest text-zinc-400">Engine Parameters</h3>
               </div>
               
               <div className="space-y-3">
                 <div className="flex justify-between items-end text-[10px] uppercase font-mono text-zinc-500">
-                  <span>Resolution Matrix</span>
-                  <span className="text-white text-lg font-sans tracking-tighter leading-none">{width}<span className="text-zinc-600 text-[10px] ml-1">px</span></span>
+                  <label htmlFor={widthInputId}>Resolution Matrix</label>
+                  <span className="text-lg font-sans leading-none tracking-tighter tabular-nums text-white">
+                    {width}
+                    <span className="ml-1 text-[10px] text-zinc-600">px</span>
+                  </span>
                 </div>
                 <input
-                  type="range" min="40" max="150"
+                  id={widthInputId}
+                  name="output-width"
+                  type="range"
+                  min="40"
+                  max="150"
                   value={width}
                   onChange={(e) => setWidth(parseInt(e.target.value, 10))}
-                  className="w-full h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-orange-500"
+                  className="h-1 w-full cursor-pointer appearance-none rounded-lg bg-zinc-800 accent-orange-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-orange-500"
                 />
               </div>
             </div>
 
             {/* Boutons d'Action Magnétiques */}
             <div className="grid grid-cols-2 gap-4">
-              <label className="relative flex flex-col items-center justify-center h-28 border border-zinc-800 border-dashed rounded-2xl cursor-pointer hover:border-orange-500/50 transition-colors group overflow-hidden bg-black/50">
-                <input type="file" accept="image/gif,image/png,image/jpeg,image/webp" onChange={handleFile} className="hidden" />
-                <motion.div whileHover={{ y: -2 }} className="flex flex-col items-center gap-3">
-                  <Upload className="w-5 h-5 text-zinc-500 group-hover:text-orange-400 transition-colors" />
+              <label
+                htmlFor={uploadInputId}
+                className="group relative flex h-28 touch-manipulation flex-col items-center justify-center overflow-hidden rounded-2xl border border-dashed border-zinc-800 bg-black/50 transition-colors hover:border-orange-500/50 focus-within:border-orange-500 focus-within:ring-2 focus-within:ring-orange-500/40"
+              >
+                <input
+                  id={uploadInputId}
+                  name="media-upload"
+                  type="file"
+                  accept="image/gif,image/png,image/jpeg,image/webp"
+                  onChange={handleFile}
+                  aria-describedby={statusRegionId}
+                  className="sr-only"
+                />
+                <motion.div
+                  whileHover={!shouldReduceMotion ? { y: -2 } : undefined}
+                  className="flex flex-col items-center gap-3"
+                >
+                  <Upload aria-hidden="true" className="h-5 w-5 text-zinc-500 transition-colors group-hover:text-orange-400" />
                   <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 group-hover:text-orange-400 transition-colors">Upload Media</span>
                 </motion.div>
                 <div className="absolute inset-0 bg-orange-500/5 translate-y-full group-hover:translate-y-0 transition-transform duration-500 ease-out" />
               </label>
 
               <button
+                type="button"
                 onClick={handleExport}
-                disabled={isExporting || (!gifAnimation && !staticAscii) || !isWasmReady}
-                className="relative flex flex-col items-center justify-center h-28 border border-zinc-800 rounded-2xl cursor-pointer group disabled:opacity-40 disabled:cursor-not-allowed overflow-hidden bg-zinc-900/50 hover:border-orange-500 transition-colors"
+                disabled={isExporting || !gifAnimation || !isWasmReady}
+                className="group relative flex h-28 touch-manipulation flex-col items-center justify-center overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/50 transition-colors hover:border-orange-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-orange-500 disabled:cursor-not-allowed disabled:opacity-40"
               >
-                <motion.div whileHover={!isExporting && (gifAnimation || staticAscii) ? { y: -2 } : {}} className="flex flex-col items-center gap-3 relative z-10">
+                <motion.div
+                  whileHover={!shouldReduceMotion && !isExporting && !!gifAnimation ? { y: -2 } : undefined}
+                  className="relative z-10 flex flex-col items-center gap-3"
+                >
                   {isExporting ? (
-                    <Sparkles className="w-5 h-5 text-black animate-pulse" />
+                    <Sparkles aria-hidden="true" className="h-5 w-5 motion-safe:animate-pulse text-black" />
                   ) : (
-                    <Download className="w-5 h-5 text-orange-500 group-hover:text-black transition-colors" />
+                    <Download aria-hidden="true" className="h-5 w-5 text-orange-500 transition-colors group-hover:text-black" />
                   )}
                   <span className={`text-[10px] font-bold uppercase tracking-widest transition-colors ${isExporting ? 'text-black' : 'text-zinc-300 group-hover:text-black'}`}>
-                    {isExporting ? 'Encoding...' : 'Export GIF'}
+                    {isExporting ? 'Encoding…' : 'Export GIF'}
                   </span>
                 </motion.div>
                 <div className="absolute inset-0 bg-orange-500 translate-y-full group-hover:translate-y-0 transition-transform duration-500 ease-out z-0" />
               </button>
             </div>
+
+            <p id={statusRegionId} className="text-[10px] uppercase tracking-widest text-zinc-500 font-mono">
+              Upload GIF, PNG, JPEG or WebP. GIF export is available for animated GIF inputs only.
+            </p>
             
             {errorMessage && (
-              <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} className="text-red-400 text-[10px] font-mono p-3 border border-red-900/30 bg-red-950/20 rounded-xl uppercase tracking-wider mt-4">
-                <span className="font-bold mr-2">Error:</span> {errorMessage}
+              <motion.div
+                initial={shouldReduceMotion ? false : { opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: 'auto' }}
+                aria-live="polite"
+                aria-atomic="true"
+                role="status"
+                className="mt-4 rounded-xl border border-red-900/30 bg-red-950/20 p-3 text-[10px] uppercase tracking-wider text-red-400 font-mono"
+              >
+                <span className="mr-2 font-bold">Erreur:</span> {errorMessage}
               </motion.div>
             )}
           </div>
@@ -353,42 +418,52 @@ const App: React.FC = () => {
 
         {/* COLONNE DROITE: Le Canvas (Viewer) */}
         <motion.div 
-          initial={{ opacity: 0, scale: 0.95 }}
+          initial={shouldReduceMotion ? false : { opacity: 0, scale: 0.95 }}
           animate={appLoaded ? { opacity: 1, scale: 1 } : {}}
-          transition={{ duration: 1.2, ease: customEase, delay: 0.6 }}
-          className="flex-[1.8] relative h-[50vh] lg:h-full rounded-4xl overflow-hidden bg-black border border-zinc-800/50 shadow-2xl"
+          transition={{ duration: shouldReduceMotion ? 0.2 : 1.2, ease: customEase, delay: shouldReduceMotion ? 0 : 0.6 }}
+          className="relative h-[50vh] min-h-[24rem] flex-[1.8] overflow-hidden rounded-4xl border border-zinc-800/50 bg-black shadow-2xl lg:h-full"
         >
           <AnimatePresence mode="wait">
             {isLoading ? (
               <motion.div 
                 key="loading"
-                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                className="absolute inset-0 flex items-center justify-center bg-black z-20"
+                initial={shouldReduceMotion ? false : { opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                aria-live="polite"
+                aria-atomic="true"
+                role="status"
+                className="absolute inset-0 z-20 flex items-center justify-center bg-black"
               >
                 <div className="flex flex-col items-center gap-4">
-                  <div className="w-8 h-8 border-2 border-orange-500 border-t-transparent rounded-full animate-spin" />
-                  <p className="text-[10px] font-mono uppercase tracking-widest text-zinc-500">Processing Pixels</p>
+                  <div className="h-8 w-8 rounded-full border-2 border-orange-500 border-t-transparent motion-safe:animate-spin" />
+                  <p className="text-[10px] font-mono uppercase tracking-widest text-zinc-500">Processing Pixels…</p>
                 </div>
               </motion.div>
             ) : gifAnimation || staticAscii ? (
               <motion.div
                 key="viewer"
-                initial={{ clipPath: "polygon(0 100%, 100% 100%, 100% 100%, 0% 100%)" }}
+                initial={shouldReduceMotion ? false : { clipPath: "polygon(0 100%, 100% 100%, 100% 100%, 0% 100%)" }}
                 animate={{ clipPath: "polygon(0 0, 100% 0, 100% 100%, 0% 100%)" }}
-                transition={{ duration: 1.2, ease: customEase }}
-                className="absolute inset-0 flex items-center justify-center p-4 bg-zinc-950"
+                transition={{ duration: shouldReduceMotion ? 0.2 : 1.2, ease: customEase }}
+                className="absolute inset-0 flex items-center justify-center bg-zinc-950 p-4"
               >
-                {staticAscii && <pre className="font-mono text-[5px] leading-tight text-zinc-300">{staticAscii}</pre>}
+                {staticAscii && (
+                  <div className="max-h-full max-w-full overflow-auto">
+                    <pre className="font-mono text-[5px] leading-tight text-zinc-300">{staticAscii}</pre>
+                  </div>
+                )}
                 {gifAnimation && <AsciiViewer animation={gifAnimation} isDarkMode={true} frameDelayMs={FRAME_DELAY_MS} />}
               </motion.div>
             ) : (
               <motion.div 
                 key="empty"
-                initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+                initial={shouldReduceMotion ? false : { opacity: 0 }}
+                animate={{ opacity: 1 }}
                 className="absolute inset-0 flex items-center justify-center bg-[#050505] bg-[radial-gradient(ellipse_at_center,var(--tw-gradient-stops))] from-zinc-900/20 via-black to-black"
               >
-                <p className="text-zinc-800 font-mono text-sm uppercase tracking-widest rotate-90 transform origin-center absolute right-12">
-                  Waiting for input_
+                <p className="absolute right-12 origin-center rotate-90 transform font-mono text-sm uppercase tracking-widest text-zinc-800">
+                  Waiting for Input_
                 </p>
               </motion.div>
             )}
