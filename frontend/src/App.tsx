@@ -1,10 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import type { ChangeEvent } from 'react';
 import init, { process_gif_to_ascii_color, process_image_to_ascii } from 'wasm-core';
-import { AsciiViewer } from './components/AsciiViewer';
 import type { PackedAsciiAnimation } from './types/ascii';
 
-// --- Nouvelles dépendances UI ---
+// --- Composants ---
+import { AsciiViewer } from './components/AsciiViewer';
+import { Preloader, customEase } from './components/Preloader';
+
+// --- UI & Icônes ---
 import { motion, AnimatePresence } from 'motion/react';
 import { Upload, Download, Settings2, Sparkles } from 'lucide-react';
 
@@ -16,9 +19,6 @@ const FONT_SIZE = 10;
 const CHAR_WIDTH = 6;
 const CHAR_HEIGHT = 10;
 const CHAR_CACHE = Array.from({ length: 256 }, (_, index) => String.fromCharCode(index));
-
-// Courbe de Bézier type "Awwwards" (démarrage vif, freinage lent)
-const customEase = [0.76, 0, 0.24, 1];
 
 type ExportWorkerRequest =
   | { type: 'start'; width: number; height: number }
@@ -119,15 +119,17 @@ const App: React.FC = () => {
   const [isExporting, setIsExporting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isWasmReady, setIsWasmReady] = useState(false);
+  
+  // State pour le preloader
   const [appLoaded, setAppLoaded] = useState(false);
 
   useEffect(() => {
     let mounted = true;
     
-    // Faux délai élégant pour laisser le temps au preloader de briller
+    // Délai de 3 secondes pour laisser l'animation du preloader s'afficher
     const timer = setTimeout(() => {
       if (mounted) setAppLoaded(true);
-    }, 2500);
+    }, 3000);
 
     init()
       .then(() => {
@@ -231,7 +233,6 @@ const App: React.FC = () => {
       worker.postMessage(startMessage);
 
       for (let frameIndex = 0; frameIndex < gifAnimation.frameCount; frameIndex++) {
-        // On force le Dark Mode = true pour l'export car on est sur un thème global Dark
         drawPackedAsciiFrame(ctx, gifAnimation, frameIndex, canvasWidth, canvasHeight, true);
 
         const imageData = ctx.getImageData(0, 0, canvasWidth, canvasHeight);
@@ -267,38 +268,8 @@ const App: React.FC = () => {
   return (
     <div className="min-h-screen bg-black text-zinc-100 font-sans selection:bg-orange-500 selection:text-white bg-grain overflow-hidden">
       
-      {/* 1. THE AWWARDS PRELOADER (Rideau Noir) */}
-      <AnimatePresence>
-        {!appLoaded && (
-          <motion.div 
-            exit={{ y: "-100%" }}
-            transition={{ duration: 1.2, ease: customEase }}
-            className="fixed inset-0 z-50 bg-black flex flex-col items-center justify-center"
-          >
-            <div className="overflow-hidden">
-              <motion.h1 
-                initial={{ y: "100%" }}
-                animate={{ y: "0%" }}
-                transition={{ duration: 1, ease: customEase, delay: 0.2 }}
-                className="text-7xl md:text-9xl font-black tracking-tighter text-white"
-              >
-                FIG2TIG
-              </motion.h1>
-            </div>
-            <div className="overflow-hidden mt-4">
-              <motion.p
-                initial={{ y: "100%" }}
-                animate={{ y: "0%" }}
-                transition={{ duration: 1, ease: customEase, delay: 0.3 }}
-                className="text-zinc-600 font-mono text-sm uppercase tracking-widest flex items-center gap-3"
-              >
-                <span className="w-2 h-2 rounded-full bg-orange-500 animate-pulse" />
-                Initializing WASM Engine
-              </motion.p>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {/* 1. THE AWWARDS PRELOADER */}
+      <Preloader isLoaded={appLoaded} />
 
       {/* 2. THE MAIN LAYOUT */}
       <main className="h-screen w-full flex flex-col lg:flex-row p-4 md:p-8 gap-8 relative z-10">
