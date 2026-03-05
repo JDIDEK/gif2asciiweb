@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import type { ChangeEvent } from 'react';
-import init, { process_image_to_ascii, process_gif_to_ascii_color, encode_gif_from_pixels } from "wasm-core";
+import init, { process_image_to_ascii, process_gif_to_ascii_color, encode_gif_from_pixels } from 'wasm-core';
 import type { AsciiPixel } from './types/ascii';
 import { AsciiViewer } from './components/AsciiViewer';
 
