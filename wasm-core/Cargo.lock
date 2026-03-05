@@ -984,6 +984,7 @@ name = "wasm-core"
 version = "0.1.0"
 dependencies = [
  "image",
+ "js-sys",
  "serde",
  "serde-wasm-bindgen",
  "wasm-bindgen",

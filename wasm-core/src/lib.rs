@@ -1,6 +1,6 @@
 use wasm_bindgen::prelude::*;
-use image::{DynamicImage, GenericImageView, AnimationDecoder};
-use image::codecs::gif::GifDecoder;
+use image::{DynamicImage, GenericImageView, AnimationDecoder, RgbaImage, Frame, Delay}; 
+use image::codecs::gif::{GifEncoder, GifDecoder, Repeat};
 use std::io::Cursor;
 use serde::{Serialize, Deserialize};
 
@@ -105,4 +105,45 @@ pub fn process_image_to_ascii(image_bytes: &[u8], target_width: u32) -> Result<S
     }
 
     Ok(ascii_art)
+}
+
+#[wasm_bindgen]
+pub fn encode_gif_from_pixels(
+    flat_pixels: &[u8],
+    width: u32,
+    height: u32,
+    frame_count: u32,
+    delay_ms: u32,
+) -> Result<js_sys::Uint8Array, JsError> {
+    let mut buffer = Vec::new();
+    
+    {
+        let mut encoder = GifEncoder::new(&mut buffer);
+        encoder.set_repeat(Repeat::Infinite)
+            .map_err(|e| JsError::new(&format!("Erreur boucle GIF: {}", e)))?;
+
+        let frame_size = (width * height * 4) as usize;
+
+        for i in 0..frame_count {
+            let start = (i as usize) * frame_size;
+            let end = start + frame_size;
+            
+            if end > flat_pixels.len() {
+                return Err(JsError::new("Buffer overflow: pas assez de pixels reçus"));
+            }
+
+            let frame_pixels = &flat_pixels[start..end];
+            
+            let img = RgbaImage::from_raw(width, height, frame_pixels.to_vec())
+                .ok_or_else(|| JsError::new("Erreur création image RGBA"))?;
+
+            let delay = Delay::from_numer_denom_ms(delay_ms, 1);
+            let frame = Frame::from_parts(img, 0, 0, delay);
+            
+            encoder.encode_frame(frame)
+                .map_err(|e| JsError::new(&format!("Erreur encodage frame: {}", e)))?;
+        }
+    }
+    
+    Ok(js_sys::Uint8Array::from(&buffer[..]))
 }
