@@ -4,6 +4,10 @@ import init, { process_gif_to_ascii_color, process_image_to_ascii } from 'wasm-c
 import { AsciiViewer } from './components/AsciiViewer';
 import type { PackedAsciiAnimation } from './types/ascii';
 
+// --- Nouvelles dépendances UI ---
+import { motion, AnimatePresence } from 'motion/react';
+import { Upload, Download, Settings2, Sparkles } from 'lucide-react';
+
 const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024;
 const MAX_SOURCE_PIXELS = 16_000_000;
 const ALLOWED_MIME_TYPES = new Set(['image/gif', 'image/png', 'image/jpeg', 'image/webp']);
@@ -12,6 +16,9 @@ const FONT_SIZE = 10;
 const CHAR_WIDTH = 6;
 const CHAR_HEIGHT = 10;
 const CHAR_CACHE = Array.from({ length: 256 }, (_, index) => String.fromCharCode(index));
+
+// Courbe de Bézier type "Awwwards" (démarrage vif, freinage lent)
+const customEase = [0.76, 0, 0.24, 1];
 
 type ExportWorkerRequest =
   | { type: 'start'; width: number; height: number }
@@ -108,14 +115,20 @@ const App: React.FC = () => {
   const [gifAnimation, setGifAnimation] = useState<PackedAsciiAnimation | null>(null);
   const [staticAscii, setStaticAscii] = useState('');
   const [width, setWidth] = useState(100);
-  const [isDarkMode, setIsDarkMode] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isWasmReady, setIsWasmReady] = useState(false);
+  const [appLoaded, setAppLoaded] = useState(false);
 
   useEffect(() => {
     let mounted = true;
+    
+    // Faux délai élégant pour laisser le temps au preloader de briller
+    const timer = setTimeout(() => {
+      if (mounted) setAppLoaded(true);
+    }, 2500);
+
     init()
       .then(() => {
         if (mounted) setIsWasmReady(true);
@@ -127,6 +140,7 @@ const App: React.FC = () => {
 
     return () => {
       mounted = false;
+      clearTimeout(timer);
     };
   }, []);
 
@@ -217,7 +231,8 @@ const App: React.FC = () => {
       worker.postMessage(startMessage);
 
       for (let frameIndex = 0; frameIndex < gifAnimation.frameCount; frameIndex++) {
-        drawPackedAsciiFrame(ctx, gifAnimation, frameIndex, canvasWidth, canvasHeight, isDarkMode);
+        // On force le Dark Mode = true pour l'export car on est sur un thème global Dark
+        drawPackedAsciiFrame(ctx, gifAnimation, frameIndex, canvasWidth, canvasHeight, true);
 
         const imageData = ctx.getImageData(0, 0, canvasWidth, canvasHeight);
         const rgba = new Uint8Array(imageData.data);
@@ -250,67 +265,166 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className={`min-h-screen transition-colors ${isDarkMode ? 'bg-zinc-950 text-white' : 'bg-zinc-50 text-zinc-900'}`}>
-      <div className="max-w-5xl mx-auto p-8">
-        <header className="flex justify-between items-center mb-12">
-          <h1 className="text-4xl font-black tracking-tighter text-orange-500">FIG2TIG</h1>
-          <button onClick={() => setIsDarkMode(!isDarkMode)} className="p-2 border rounded-lg text-xs font-bold">
-            {isDarkMode ? '🌙 DARK' : '☀️ LIGHT'}
-          </button>
-        </header>
-
-        <div className={`p-6 rounded-2xl border mb-8 ${isDarkMode ? 'bg-zinc-900 border-zinc-800' : 'bg-white border-zinc-200'}`}>
-          <div className="flex flex-col md:flex-row gap-6 items-center">
-            <input
-              type="file"
-              accept="image/gif,image/png,image/jpeg,image/webp"
-              onChange={handleFile}
-              className="text-sm cursor-pointer file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:bg-orange-500 file:text-white"
-            />
-            <div className="flex-1 w-full">
-              <label className="text-[10px] uppercase opacity-50 font-bold">Width: {width}px</label>
-              <input
-                type="range"
-                min="40"
-                max="150"
-                value={width}
-                onChange={(e) => setWidth(parseInt(e.target.value, 10))}
-                className="w-full accent-orange-500"
-              />
+    <div className="min-h-screen bg-black text-zinc-100 font-sans selection:bg-orange-500 selection:text-white bg-grain overflow-hidden">
+      
+      {/* 1. THE AWWARDS PRELOADER (Rideau Noir) */}
+      <AnimatePresence>
+        {!appLoaded && (
+          <motion.div 
+            exit={{ y: "-100%" }}
+            transition={{ duration: 1.2, ease: customEase }}
+            className="fixed inset-0 z-50 bg-black flex flex-col items-center justify-center"
+          >
+            <div className="overflow-hidden">
+              <motion.h1 
+                initial={{ y: "100%" }}
+                animate={{ y: "0%" }}
+                transition={{ duration: 1, ease: customEase, delay: 0.2 }}
+                className="text-7xl md:text-9xl font-black tracking-tighter text-white"
+              >
+                FIG2TIG
+              </motion.h1>
             </div>
-          </div>
-
-          {errorMessage && (
-            <div className="mt-4 rounded-lg border border-red-500/30 bg-red-500/10 text-red-300 text-xs px-3 py-2">
-              {errorMessage}
+            <div className="overflow-hidden mt-4">
+              <motion.p
+                initial={{ y: "100%" }}
+                animate={{ y: "0%" }}
+                transition={{ duration: 1, ease: customEase, delay: 0.3 }}
+                className="text-zinc-600 font-mono text-sm uppercase tracking-widest flex items-center gap-3"
+              >
+                <span className="w-2 h-2 rounded-full bg-orange-500 animate-pulse" />
+                Initializing WASM Engine
+              </motion.p>
             </div>
-          )}
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-          <div className="flex justify-end mt-4 pt-4 border-t border-zinc-500/20">
-            <button
-              onClick={handleExport}
-              disabled={isExporting || !gifAnimation || !isWasmReady}
-              className={`px-6 py-2 rounded-lg font-bold text-xs uppercase transition-all
-                ${!gifAnimation || !isWasmReady ? 'bg-zinc-800/50 text-zinc-500 cursor-not-allowed border border-transparent'
-                : isExporting ? 'bg-orange-500/50 text-white animate-pulse border border-orange-500'
-                : 'bg-orange-500 hover:bg-orange-600 text-white shadow-lg hover:shadow-orange-500/20 border border-transparent'}`}
-            >
-              {isExporting ? 'RUST ENCODING...' : 'EXPORTER EN GIF'}
-            </button>
+      {/* 2. THE MAIN LAYOUT */}
+      <main className="h-screen w-full flex flex-col lg:flex-row p-4 md:p-8 gap-8 relative z-10">
+        
+        {/* COLONNE GAUCHE: Contrôles & Typo */}
+        <motion.div 
+          initial={{ opacity: 0, x: -50 }}
+          animate={appLoaded ? { opacity: 1, x: 0 } : {}}
+          transition={{ duration: 1.2, ease: customEase, delay: 0.4 }}
+          className="flex-1 flex flex-col justify-between"
+        >
+          <header className="pt-4">
+            <h1 className="text-6xl md:text-[5.5rem] font-black tracking-tighter leading-[0.85] text-white">
+              ASCII <br/> 
+              <span className="text-orange-500 italic font-serif font-light tracking-normal">Masterpiece.</span>
+            </h1>
+            <p className="mt-8 text-zinc-500 font-mono text-xs max-w-sm uppercase leading-relaxed">
+              High-performance WebAssembly engine. <br/> converting pixels into typography at 60fps.
+            </p>
+          </header>
+
+          <div className="space-y-6 mt-12 lg:mt-0 pb-4">
+            {/* Panneau de configuration */}
+            <div className="group relative border border-zinc-800/80 bg-zinc-900/30 backdrop-blur-md rounded-2xl p-6 transition-all hover:border-zinc-700 hover:bg-zinc-900/50">
+              <div className="flex items-center gap-3 mb-8">
+                <Settings2 className="w-4 h-4 text-orange-500" />
+                <h3 className="text-[10px] uppercase font-bold tracking-widest text-zinc-400">Engine Parameters</h3>
+              </div>
+              
+              <div className="space-y-3">
+                <div className="flex justify-between items-end text-[10px] uppercase font-mono text-zinc-500">
+                  <span>Resolution Matrix</span>
+                  <span className="text-white text-lg font-sans tracking-tighter leading-none">{width}<span className="text-zinc-600 text-[10px] ml-1">px</span></span>
+                </div>
+                <input
+                  type="range" min="40" max="150"
+                  value={width}
+                  onChange={(e) => setWidth(parseInt(e.target.value, 10))}
+                  className="w-full h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-orange-500"
+                />
+              </div>
+            </div>
+
+            {/* Boutons d'Action Magnétiques */}
+            <div className="grid grid-cols-2 gap-4">
+              <label className="relative flex flex-col items-center justify-center h-28 border border-zinc-800 border-dashed rounded-2xl cursor-pointer hover:border-orange-500/50 transition-colors group overflow-hidden bg-black/50">
+                <input type="file" accept="image/gif,image/png,image/jpeg,image/webp" onChange={handleFile} className="hidden" />
+                <motion.div whileHover={{ y: -2 }} className="flex flex-col items-center gap-3">
+                  <Upload className="w-5 h-5 text-zinc-500 group-hover:text-orange-400 transition-colors" />
+                  <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 group-hover:text-orange-400 transition-colors">Upload Media</span>
+                </motion.div>
+                <div className="absolute inset-0 bg-orange-500/5 translate-y-full group-hover:translate-y-0 transition-transform duration-500 ease-out" />
+              </label>
+
+              <button
+                onClick={handleExport}
+                disabled={isExporting || (!gifAnimation && !staticAscii) || !isWasmReady}
+                className="relative flex flex-col items-center justify-center h-28 border border-zinc-800 rounded-2xl cursor-pointer group disabled:opacity-40 disabled:cursor-not-allowed overflow-hidden bg-zinc-900/50 hover:border-orange-500 transition-colors"
+              >
+                <motion.div whileHover={!isExporting && (gifAnimation || staticAscii) ? { y: -2 } : {}} className="flex flex-col items-center gap-3 relative z-10">
+                  {isExporting ? (
+                    <Sparkles className="w-5 h-5 text-black animate-pulse" />
+                  ) : (
+                    <Download className="w-5 h-5 text-orange-500 group-hover:text-black transition-colors" />
+                  )}
+                  <span className={`text-[10px] font-bold uppercase tracking-widest transition-colors ${isExporting ? 'text-black' : 'text-zinc-300 group-hover:text-black'}`}>
+                    {isExporting ? 'Encoding...' : 'Export GIF'}
+                  </span>
+                </motion.div>
+                <div className="absolute inset-0 bg-orange-500 translate-y-full group-hover:translate-y-0 transition-transform duration-500 ease-out z-0" />
+              </button>
+            </div>
+            
+            {errorMessage && (
+              <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} className="text-red-400 text-[10px] font-mono p-3 border border-red-900/30 bg-red-950/20 rounded-xl uppercase tracking-wider mt-4">
+                <span className="font-bold mr-2">Error:</span> {errorMessage}
+              </motion.div>
+            )}
           </div>
-        </div>
+        </motion.div>
 
-        <div className={`rounded-xl p-8 overflow-hidden min-h-75 flex items-center justify-center border ${isDarkMode ? 'bg-black border-zinc-800' : 'bg-zinc-100 border-zinc-200'}`}>
-          {isLoading ? (
-            <div className="animate-pulse font-mono text-zinc-500 uppercase text-xs">Processing via Rust...</div>
-          ) : (
-            <>
-              {staticAscii && <pre className="font-mono text-[6px] leading-1.25">{staticAscii}</pre>}
-              <AsciiViewer animation={gifAnimation} isDarkMode={isDarkMode} frameDelayMs={FRAME_DELAY_MS} />
-            </>
-          )}
-        </div>
-      </div>
+        {/* COLONNE DROITE: Le Canvas (Viewer) */}
+        <motion.div 
+          initial={{ opacity: 0, scale: 0.95 }}
+          animate={appLoaded ? { opacity: 1, scale: 1 } : {}}
+          transition={{ duration: 1.2, ease: customEase, delay: 0.6 }}
+          className="flex-[1.8] relative h-[50vh] lg:h-full rounded-4xl overflow-hidden bg-black border border-zinc-800/50 shadow-2xl"
+        >
+          <AnimatePresence mode="wait">
+            {isLoading ? (
+              <motion.div 
+                key="loading"
+                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                className="absolute inset-0 flex items-center justify-center bg-black z-20"
+              >
+                <div className="flex flex-col items-center gap-4">
+                  <div className="w-8 h-8 border-2 border-orange-500 border-t-transparent rounded-full animate-spin" />
+                  <p className="text-[10px] font-mono uppercase tracking-widest text-zinc-500">Processing Pixels</p>
+                </div>
+              </motion.div>
+            ) : gifAnimation || staticAscii ? (
+              <motion.div
+                key="viewer"
+                initial={{ clipPath: "polygon(0 100%, 100% 100%, 100% 100%, 0% 100%)" }}
+                animate={{ clipPath: "polygon(0 0, 100% 0, 100% 100%, 0% 100%)" }}
+                transition={{ duration: 1.2, ease: customEase }}
+                className="absolute inset-0 flex items-center justify-center p-4 bg-zinc-950"
+              >
+                {staticAscii && <pre className="font-mono text-[5px] leading-tight text-zinc-300">{staticAscii}</pre>}
+                {gifAnimation && <AsciiViewer animation={gifAnimation} isDarkMode={true} frameDelayMs={FRAME_DELAY_MS} />}
+              </motion.div>
+            ) : (
+              <motion.div 
+                key="empty"
+                initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+                className="absolute inset-0 flex items-center justify-center bg-[#050505] bg-[radial-gradient(ellipse_at_center,var(--tw-gradient-stops))] from-zinc-900/20 via-black to-black"
+              >
+                <p className="text-zinc-800 font-mono text-sm uppercase tracking-widest rotate-90 transform origin-center absolute right-12">
+                  Waiting for input_
+                </p>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </motion.div>
+
+      </main>
     </div>
   );
 };
