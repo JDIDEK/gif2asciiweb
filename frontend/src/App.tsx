@@ -1,116 +1,250 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import type { ChangeEvent } from 'react';
-import init, { process_image_to_ascii, process_gif_to_ascii_color, encode_gif_from_pixels } from 'wasm-core';
-import type { AsciiPixel } from './types/ascii';
+import init, { process_gif_to_ascii_color, process_image_to_ascii } from 'wasm-core';
 import { AsciiViewer } from './components/AsciiViewer';
+import type { PackedAsciiAnimation } from './types/ascii';
+
+const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024;
+const MAX_SOURCE_PIXELS = 16_000_000;
+const ALLOWED_MIME_TYPES = new Set(['image/gif', 'image/png', 'image/jpeg', 'image/webp']);
+const FRAME_DELAY_MS = 100;
+const FONT_SIZE = 10;
+const CHAR_WIDTH = 6;
+const CHAR_HEIGHT = 10;
+const CHAR_CACHE = Array.from({ length: 256 }, (_, index) => String.fromCharCode(index));
+
+type ExportWorkerRequest =
+  | { type: 'start'; width: number; height: number }
+  | { type: 'frame'; rgba: ArrayBuffer; delayCs: number }
+  | { type: 'finish' };
+
+type ExportWorkerResponse =
+  | { type: 'done'; gif: ArrayBuffer }
+  | { type: 'error'; message: string };
+
+function asPositiveInt(value: unknown, field: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`Champ ${field} invalide`);
+  }
+  return parsed;
+}
+
+function asUint8Array(value: unknown, field: string): Uint8Array {
+  if (value instanceof Uint8Array) return value;
+  if (Array.isArray(value)) return Uint8Array.from(value as number[]);
+  throw new Error(`Champ ${field} invalide`);
+}
+
+function asUint16Array(value: unknown, field: string): Uint16Array {
+  if (value instanceof Uint16Array) return value;
+  if (Array.isArray(value)) return Uint16Array.from(value as number[]);
+  throw new Error(`Champ ${field} invalide`);
+}
+
+function normalizePackedAnimation(raw: unknown): PackedAsciiAnimation {
+  if (!raw || typeof raw !== 'object') {
+    throw new Error('Réponse GIF invalide');
+  }
+
+  const payload = raw as Record<string, unknown>;
+  const width = asPositiveInt(payload.width, 'width');
+  const height = asPositiveInt(payload.height, 'height');
+  const frameCount = asPositiveInt(payload.frameCount, 'frameCount');
+  const chars = asUint8Array(payload.chars, 'chars');
+  const rgb = asUint8Array(payload.rgb, 'rgb');
+  let delaysMs = asUint16Array(payload.delaysMs, 'delaysMs');
+
+  const cellsPerFrame = width * height;
+  if (chars.length !== cellsPerFrame * frameCount) {
+    throw new Error('Taille chars incohérente');
+  }
+  if (rgb.length !== cellsPerFrame * frameCount * 3) {
+    throw new Error('Taille rgb incohérente');
+  }
+  if (delaysMs.length !== frameCount) {
+    const fallback = new Uint16Array(frameCount);
+    fallback.fill(FRAME_DELAY_MS);
+    delaysMs = fallback;
+  }
+
+  return { width, height, frameCount, chars, rgb, delaysMs };
+}
+
+function drawPackedAsciiFrame(
+  ctx: CanvasRenderingContext2D,
+  animation: PackedAsciiAnimation,
+  frameIndex: number,
+  canvasWidth: number,
+  canvasHeight: number,
+  isDarkMode: boolean
+) {
+  ctx.fillStyle = isDarkMode ? '#000000' : '#f4f4f5';
+  ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+  ctx.font = `bold ${FONT_SIZE}px monospace`;
+  ctx.textBaseline = 'top';
+
+  const frameCells = animation.width * animation.height;
+  const charOffset = frameIndex * frameCells;
+  const rgbOffset = charOffset * 3;
+
+  for (let i = 0; i < frameCells; i++) {
+    const charCode = animation.chars[charOffset + i];
+    if (charCode === 0 || charCode === 32) continue;
+
+    const rgbIndex = rgbOffset + i * 3;
+    const red = animation.rgb[rgbIndex];
+    const green = animation.rgb[rgbIndex + 1];
+    const blue = animation.rgb[rgbIndex + 2];
+    const x = (i % animation.width) * CHAR_WIDTH;
+    const y = Math.floor(i / animation.width) * CHAR_HEIGHT;
+
+    ctx.fillStyle = `rgb(${red}, ${green}, ${blue})`;
+    ctx.fillText(CHAR_CACHE[charCode], x, y);
+  }
+}
 
 const App: React.FC = () => {
-  const [gifFrames, setGifFrames] = useState<AsciiPixel[][]>([]);
-  const [staticAscii, setStaticAscii] = useState<string>("");
-  const [currentFrame, setCurrentFrame] = useState(0);
+  const [gifAnimation, setGifAnimation] = useState<PackedAsciiAnimation | null>(null);
+  const [staticAscii, setStaticAscii] = useState('');
   const [width, setWidth] = useState(100);
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
-
-  useEffect(() => { init(); }, []);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isWasmReady, setIsWasmReady] = useState(false);
 
   useEffect(() => {
-    if (gifFrames.length > 0) {
-      const interval = setInterval(() => {
-        setCurrentFrame((prev) => (prev + 1) % gifFrames.length);
-      }, 100);
-      return () => clearInterval(interval);
-    }
-  }, [gifFrames.length]);
+    let mounted = true;
+    init()
+      .then(() => {
+        if (mounted) setIsWasmReady(true);
+      })
+      .catch((err) => {
+        console.error('Erreur init WASM:', err);
+        if (mounted) setErrorMessage('Initialisation WASM impossible');
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   const handleFile = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    setGifFrames([]);
-    setStaticAscii("");
-    setCurrentFrame(0);
+    setErrorMessage(null);
+    if (!isWasmReady) {
+      setErrorMessage('Le moteur WASM n’est pas encore prêt.');
+      return;
+    }
+    if (!ALLOWED_MIME_TYPES.has(file.type)) {
+      setErrorMessage('Type de fichier non supporté.');
+      return;
+    }
+    if (file.size > MAX_FILE_SIZE_BYTES) {
+      setErrorMessage('Fichier trop volumineux (max 20MB).');
+      return;
+    }
+
+    setGifAnimation(null);
+    setStaticAscii('');
     setIsLoading(true);
 
-    const bytes = new Uint8Array(await file.arrayBuffer());
     try {
-      if (file.type === "image/gif") {
-        const result = await process_gif_to_ascii_color(bytes, width);
-        setGifFrames(result as AsciiPixel[][]);
+      const bitmap = await createImageBitmap(file);
+      const sourcePixels = bitmap.width * bitmap.height;
+      bitmap.close();
+      if (sourcePixels > MAX_SOURCE_PIXELS) {
+        throw new Error('Image trop grande (limite pixels dépassée)');
+      }
+
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      if (file.type === 'image/gif') {
+        const rawResult = await process_gif_to_ascii_color(bytes, width);
+        const animation = normalizePackedAnimation(rawResult);
+        setGifAnimation(animation);
       } else {
         const result = await process_image_to_ascii(bytes, width);
         setStaticAscii(result);
       }
     } catch (err) {
-      console.error("Erreur WASM:", err);
+      console.error('Erreur WASM:', err);
+      setErrorMessage(err instanceof Error ? err.message : 'Erreur de traitement du fichier');
     } finally {
       setIsLoading(false);
     }
   };
 
   const handleExport = async () => {
-    if (gifFrames.length === 0) return;
+    if (!gifAnimation || isExporting) return;
+
+    setErrorMessage(null);
     setIsExporting(true);
 
+    let worker: Worker | null = null;
     try {
-      await new Promise(resolve => setTimeout(resolve, 50)); 
-
-      const frameHeight = Math.floor(gifFrames[0].length / width);
-      const fontSize = 10;
-      const charWidth = 6;
-      const charHeight = 10;
-      
-      const canvasWidth = width * charWidth;
-      const canvasHeight = frameHeight * charHeight;
-      
+      const canvasWidth = gifAnimation.width * CHAR_WIDTH;
+      const canvasHeight = gifAnimation.height * CHAR_HEIGHT;
       const canvas = document.createElement('canvas');
       canvas.width = canvasWidth;
       canvas.height = canvasHeight;
+
       const ctx = canvas.getContext('2d', { willReadFrequently: true });
-      if (!ctx) throw new Error("Erreur de contexte 2D");
+      if (!ctx) throw new Error('Erreur de contexte 2D');
 
-      const totalPixels = canvasWidth * canvasHeight * 4 * gifFrames.length;
-      const flatPixels = new Uint8Array(totalPixels);
+      worker = new Worker(new URL('./workers/export.worker.ts', import.meta.url), { type: 'module' });
+      const workerDone = new Promise<ArrayBuffer>((resolve, reject) => {
+        worker!.onmessage = (event: MessageEvent<ExportWorkerResponse>) => {
+          const data = event.data;
+          if (data.type === 'done') {
+            resolve(data.gif);
+            return;
+          }
+          if (data.type === 'error') {
+            reject(new Error(data.message));
+          }
+        };
+        worker!.onerror = (event) => reject(new Error(event.message || 'Erreur Worker export'));
+      });
 
-      for (let f = 0; f < gifFrames.length; f++) {
-        const frame = gifFrames[f];
-        
-        ctx.fillStyle = isDarkMode ? '#000000' : '#f4f4f5';
-        ctx.fillRect(0, 0, canvasWidth, canvasHeight);
-        ctx.font = `bold ${fontSize}px monospace`;
-        ctx.textBaseline = 'top';
+      const startMessage: ExportWorkerRequest = {
+        type: 'start',
+        width: canvasWidth,
+        height: canvasHeight
+      };
+      worker.postMessage(startMessage);
 
-        for (let i = 0; i < frame.length; i++) {
-          const pixel = frame[i];
-          if (!pixel || !pixel.character || pixel.character === ' ') continue;
-          
-          const x = (i % width) * charWidth;
-          const y = Math.floor(i / width) * charHeight;
-          ctx.fillStyle = `rgb(${pixel.red}, ${pixel.green}, ${pixel.blue})`;
-          ctx.fillText(pixel.character, x, y);
-        }
+      for (let frameIndex = 0; frameIndex < gifAnimation.frameCount; frameIndex++) {
+        drawPackedAsciiFrame(ctx, gifAnimation, frameIndex, canvasWidth, canvasHeight, isDarkMode);
 
         const imageData = ctx.getImageData(0, 0, canvasWidth, canvasHeight);
-        flatPixels.set(imageData.data, f * canvasWidth * canvasHeight * 4);
+        const rgba = new Uint8Array(imageData.data);
+        const delayMs = gifAnimation.delaysMs[frameIndex] || FRAME_DELAY_MS;
+        const delayCs = Math.max(1, Math.round(delayMs / 10));
+        const frameMessage: ExportWorkerRequest = { type: 'frame', rgba: rgba.buffer, delayCs };
+        worker.postMessage(frameMessage, [rgba.buffer]);
       }
 
-      const gifBytes = encode_gif_from_pixels(flatPixels, canvasWidth, canvasHeight, gifFrames.length, 100);
+      const finishMessage: ExportWorkerRequest = { type: 'finish' };
+      worker.postMessage(finishMessage);
+      const gifBuffer = await workerDone;
 
-      const blob = new Blob([gifBytes], { type: 'image/gif' });
+      const blob = new Blob([gifBuffer], { type: 'image/gif' });
       const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'fig2tig_masterpiece.gif';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'fig2tig_masterpiece.gif';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
       URL.revokeObjectURL(url);
-      
     } catch (err) {
-      console.error("Erreur Export:", err);
-      alert("Une erreur est survenue lors de l'encodage du GIF.");
+      console.error('Erreur Export:', err);
+      setErrorMessage(err instanceof Error ? err.message : 'Erreur lors de l\'export GIF');
     } finally {
+      if (worker) worker.terminate();
       setIsExporting(false);
     }
   };
@@ -118,7 +252,6 @@ const App: React.FC = () => {
   return (
     <div className={`min-h-screen transition-colors ${isDarkMode ? 'bg-zinc-950 text-white' : 'bg-zinc-50 text-zinc-900'}`}>
       <div className="max-w-5xl mx-auto p-8">
-        
         <header className="flex justify-between items-center mb-12">
           <h1 className="text-4xl font-black tracking-tighter text-orange-500">FIG2TIG</h1>
           <button onClick={() => setIsDarkMode(!isDarkMode)} className="p-2 border rounded-lg text-xs font-bold">
@@ -128,20 +261,38 @@ const App: React.FC = () => {
 
         <div className={`p-6 rounded-2xl border mb-8 ${isDarkMode ? 'bg-zinc-900 border-zinc-800' : 'bg-white border-zinc-200'}`}>
           <div className="flex flex-col md:flex-row gap-6 items-center">
-            <input type="file" onChange={handleFile} className="text-sm cursor-pointer file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:bg-orange-500 file:text-white" />
+            <input
+              type="file"
+              accept="image/gif,image/png,image/jpeg,image/webp"
+              onChange={handleFile}
+              className="text-sm cursor-pointer file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:bg-orange-500 file:text-white"
+            />
             <div className="flex-1 w-full">
               <label className="text-[10px] uppercase opacity-50 font-bold">Width: {width}px</label>
-              <input type="range" min="40" max="150" value={width} onChange={(e) => setWidth(parseInt(e.target.value))} className="w-full accent-orange-500" />
+              <input
+                type="range"
+                min="40"
+                max="150"
+                value={width}
+                onChange={(e) => setWidth(parseInt(e.target.value, 10))}
+                className="w-full accent-orange-500"
+              />
             </div>
           </div>
-          
+
+          {errorMessage && (
+            <div className="mt-4 rounded-lg border border-red-500/30 bg-red-500/10 text-red-300 text-xs px-3 py-2">
+              {errorMessage}
+            </div>
+          )}
+
           <div className="flex justify-end mt-4 pt-4 border-t border-zinc-500/20">
-            <button 
+            <button
               onClick={handleExport}
-              disabled={isExporting || gifFrames.length === 0}
+              disabled={isExporting || !gifAnimation || !isWasmReady}
               className={`px-6 py-2 rounded-lg font-bold text-xs uppercase transition-all
-                ${gifFrames.length === 0 ? 'bg-zinc-800/50 text-zinc-500 cursor-not-allowed border border-transparent' 
-                : isExporting ? 'bg-orange-500/50 text-white animate-pulse border border-orange-500' 
+                ${!gifAnimation || !isWasmReady ? 'bg-zinc-800/50 text-zinc-500 cursor-not-allowed border border-transparent'
+                : isExporting ? 'bg-orange-500/50 text-white animate-pulse border border-orange-500'
                 : 'bg-orange-500 hover:bg-orange-600 text-white shadow-lg hover:shadow-orange-500/20 border border-transparent'}`}
             >
               {isExporting ? 'RUST ENCODING...' : 'EXPORTER EN GIF'}
@@ -155,11 +306,10 @@ const App: React.FC = () => {
           ) : (
             <>
               {staticAscii && <pre className="font-mono text-[6px] leading-1.25">{staticAscii}</pre>}
-              <AsciiViewer frames={gifFrames} currentFrame={currentFrame} width={width} isDarkMode={isDarkMode} />
+              <AsciiViewer animation={gifAnimation} isDarkMode={isDarkMode} frameDelayMs={FRAME_DELAY_MS} />
             </>
           )}
         </div>
-        
       </div>
     </div>
   );

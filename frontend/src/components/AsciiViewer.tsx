@@ -1,73 +1,107 @@
 import React, { useEffect, useRef } from 'react';
-import type { AsciiPixel } from '../types/ascii';
+import type { PackedAsciiAnimation } from '../types/ascii';
 
 interface Props {
-  frames: AsciiPixel[][];
-  currentFrame: number;
-  width: number;
+  animation: PackedAsciiAnimation | null;
   isDarkMode: boolean;
+  frameDelayMs?: number;
 }
 
-export const AsciiViewer: React.FC<Props> = ({ frames, currentFrame, width, isDarkMode }) => {
+const FONT_SIZE = 10;
+const CHAR_WIDTH = 6;
+const CHAR_HEIGHT = 10;
+
+const CHAR_CACHE = Array.from({ length: 256 }, (_, index) => String.fromCharCode(index));
+
+function drawAsciiFrame(
+  ctx: CanvasRenderingContext2D,
+  animation: PackedAsciiAnimation,
+  frameIndex: number,
+  canvasWidth: number,
+  canvasHeight: number,
+  isDarkMode: boolean
+) {
+  ctx.fillStyle = isDarkMode ? '#000000' : '#f4f4f5';
+  ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+  ctx.font = `bold ${FONT_SIZE}px monospace`;
+  ctx.textBaseline = 'top';
+
+  const frameCells = animation.width * animation.height;
+  const charOffset = frameIndex * frameCells;
+  const rgbOffset = charOffset * 3;
+
+  for (let i = 0; i < frameCells; i++) {
+    const charCode = animation.chars[charOffset + i];
+    if (charCode === 32 || charCode === 0) continue;
+
+    const rgbIndex = rgbOffset + i * 3;
+    const red = animation.rgb[rgbIndex];
+    const green = animation.rgb[rgbIndex + 1];
+    const blue = animation.rgb[rgbIndex + 2];
+    const x = (i % animation.width) * CHAR_WIDTH;
+    const y = Math.floor(i / animation.width) * CHAR_HEIGHT;
+
+    ctx.fillStyle = `rgb(${red}, ${green}, ${blue})`;
+    ctx.fillText(CHAR_CACHE[charCode], x, y);
+  }
+}
+
+export const AsciiViewer: React.FC<Props> = ({ animation, isDarkMode, frameDelayMs = 100 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas || !animation || animation.frameCount === 0) return;
+
+    const canvasWidth = animation.width * CHAR_WIDTH;
+    const canvasHeight = animation.height * CHAR_HEIGHT;
+    canvas.width = canvasWidth;
+    canvas.height = canvasHeight;
 
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const frame = frames[currentFrame];
-    
-    // Vérification que la frame existe et contient des pixels
-    if (!frame || frame.length === 0) return;
+    let rafId = 0;
+    let frameIndex = 0;
+    let last = performance.now();
+    let accumulator = 0;
 
-    // Calcul de la vraie hauteur
-    const actualHeight = Math.floor(frame.length / width);
-    if (actualHeight === 0) return;
+    drawAsciiFrame(ctx, animation, frameIndex, canvasWidth, canvasHeight, isDarkMode);
 
-    // Configuration de la police
-    const fontSize = 10;
-    const charWidth = 6; // Ratio standard monospace
-    const charHeight = 10;
+    const tick = (now: number) => {
+      accumulator += now - last;
+      last = now;
 
-    // Redimensionnement du canvas
-    canvas.width = width * charWidth;
-    canvas.height = actualHeight * charHeight;
+      let activeDelay = animation.delaysMs[frameIndex] || frameDelayMs;
+      while (accumulator >= activeDelay) {
+        accumulator -= activeDelay;
+        frameIndex = (frameIndex + 1) % animation.frameCount;
+        activeDelay = animation.delaysMs[frameIndex] || frameDelayMs;
+      }
 
-    // Remplissage du fond
-    ctx.fillStyle = isDarkMode ? '#000000' : '#f4f4f5';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+      drawAsciiFrame(ctx, animation, frameIndex, canvasWidth, canvasHeight, isDarkMode);
+      rafId = requestAnimationFrame(tick);
+    };
 
-    ctx.font = `bold ${fontSize}px monospace`;
-    ctx.textBaseline = 'top';
-
-    // Rendu des pixels
-    for (let i = 0; i < frame.length; i++) {
-      const pixel = frame[i];
-      
-      if (!pixel || !pixel.character || pixel.character === ' ') continue;
-
-      const x = (i % width) * charWidth;
-      const y = Math.floor(i / width) * charHeight;
-
-      ctx.fillStyle = `rgb(${pixel.red}, ${pixel.green}, ${pixel.blue})`;
-      ctx.fillText(pixel.character, x, y);
+    if (animation.frameCount > 1) {
+      rafId = requestAnimationFrame(tick);
     }
 
-  }, [frames, currentFrame, width, isDarkMode]);
+    return () => {
+      if (rafId) cancelAnimationFrame(rafId);
+    };
+  }, [animation, isDarkMode, frameDelayMs]);
 
-  if (!frames || frames.length === 0) return null;
+  if (!animation || animation.frameCount === 0) return null;
 
   return (
     <div className="flex justify-center items-center w-full h-full overflow-hidden">
-      <canvas 
-        ref={canvasRef} 
+      <canvas
+        ref={canvasRef}
         className="max-w-full rounded shadow-lg border border-zinc-800/50 min-h-50"
-        style={{ 
+        style={{
           imageRendering: 'pixelated',
-          height: 'auto' 
+          height: 'auto'
         }}
       />
     </div>

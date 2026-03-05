@@ -1,92 +1,212 @@
-use wasm_bindgen::prelude::*;
-use image::{DynamicImage, GenericImageView, AnimationDecoder, RgbaImage, Frame, Delay}; 
-use image::codecs::gif::{GifEncoder, GifDecoder, Repeat};
+use gif::{Encoder as RawGifEncoder, Frame as RawGifFrame, Repeat as RawGifRepeat};
+use image::codecs::gif::GifDecoder;
+use image::{AnimationDecoder, DynamicImage, GenericImageView};
+use js_sys::{Object, Reflect, Uint8Array, Uint16Array};
 use std::io::Cursor;
-use serde::{Serialize, Deserialize};
+use wasm_bindgen::prelude::*;
 
 const ASCII_CHARS: &[u8] = b" .,:;+*?%#@";
+const MAX_INPUT_BYTES: usize = 20 * 1024 * 1024;
+const MAX_TARGET_WIDTH: u32 = 300;
+const MAX_GIF_FRAMES: usize = 600;
+const MAX_EXPORT_PIXELS_PER_FRAME: u64 = 8_000_000;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct AsciiPixel {
-    pub character: char,
-    pub red: u8,
-    pub green: u8,
-    pub blue: u8,
+fn ensure_target_width(target_width: u32) -> Result<(), JsError> {
+    if target_width == 0 || target_width > MAX_TARGET_WIDTH {
+        return Err(JsError::new("Largeur ASCII hors limites"));
+    }
+    Ok(())
+}
+
+fn ensure_input_size(image_bytes: &[u8]) -> Result<(), JsError> {
+    if image_bytes.is_empty() || image_bytes.len() > MAX_INPUT_BYTES {
+        return Err(JsError::new("Fichier vide ou trop volumineux"));
+    }
+    Ok(())
+}
+
+fn compute_target_height(
+    source_width: u32,
+    source_height: u32,
+    target_width: u32,
+) -> Result<u32, JsError> {
+    if source_width == 0 || source_height == 0 {
+        return Err(JsError::new("Dimensions source invalides"));
+    }
+    let aspect_ratio = (source_height as f32 / source_width as f32) * 0.55;
+    Ok(((target_width as f32 * aspect_ratio).round() as u32).max(1))
+}
+
+fn ascii_byte_from_rgb(red: u8, green: u8, blue: u8) -> u8 {
+    let luminance = 0.299 * red as f32 + 0.587 * green as f32 + 0.114 * blue as f32;
+    let idx = ((luminance / 255.0) * (ASCII_CHARS.len() - 1) as f32) as usize;
+    ASCII_CHARS[idx.min(ASCII_CHARS.len() - 1)]
+}
+
+fn checked_ascii_cells_len(width: u32, height: u32) -> Result<usize, JsError> {
+    (width as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| JsError::new("Overflow grille ASCII"))
+}
+
+fn checked_rgba_frame_len(width: u32, height: u32) -> Result<usize, JsError> {
+    let frame_pixels = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| JsError::new("Overflow dimensions"))?;
+    frame_pixels
+        .checked_mul(4)
+        .ok_or_else(|| JsError::new("Overflow buffer RGBA"))
+}
+
+fn ensure_export_dimensions(width: u32, height: u32) -> Result<(u16, u16), JsError> {
+    let pixels_per_frame = (width as u64) * (height as u64);
+    if pixels_per_frame == 0 || pixels_per_frame > MAX_EXPORT_PIXELS_PER_FRAME {
+        return Err(JsError::new("Dimensions export GIF hors limites"));
+    }
+    let w = u16::try_from(width).map_err(|_| JsError::new("Largeur GIF > 65535"))?;
+    let h = u16::try_from(height).map_err(|_| JsError::new("Hauteur GIF > 65535"))?;
+    Ok((w, h))
+}
+
+fn delay_ms_to_cs(delay_ms: u32) -> u16 {
+    let cs = ((delay_ms + 5) / 10).max(1);
+    cs.min(u16::MAX as u32) as u16
 }
 
 #[wasm_bindgen]
-pub fn process_gif_to_ascii_color(image_bytes: &[u8], target_width: u32) -> Result<JsValue, JsError> {
-    if image_bytes.len() < 6 || !(&image_bytes[0..3] == b"GIF") {
-        return Err(JsError::new("Le fichier n'est pas un GIF valide (Header manquant)"));
+pub fn process_gif_to_ascii_color(
+    image_bytes: &[u8],
+    target_width: u32,
+) -> Result<JsValue, JsError> {
+    ensure_input_size(image_bytes)?;
+    ensure_target_width(target_width)?;
+
+    if image_bytes.len() < 6
+        || !(image_bytes.starts_with(b"GIF87a") || image_bytes.starts_with(b"GIF89a"))
+    {
+        return Err(JsError::new("Le fichier n'est pas un GIF valide"));
     }
 
     let cursor = Cursor::new(image_bytes);
-    
-    let decoder = GifDecoder::new(cursor)
-        .map_err(|_| JsError::new("Impossible de décoder le GIF. Vérifiez le format."))?;
 
-    let frames = decoder.into_frames()
+    let decoder =
+        GifDecoder::new(cursor).map_err(|e| JsError::new(&format!("Erreur init GIF: {e}")))?;
+
+    let frames = decoder
+        .into_frames()
         .collect_frames()
         .map_err(|e| JsError::new(&format!("Erreur frames: {}", e)))?;
 
-    let mut all_frames: Vec<Vec<AsciiPixel>> = Vec::new();
+    if frames.is_empty() {
+        return Err(JsError::new("GIF sans frame exploitable"));
+    }
+    if frames.len() > MAX_GIF_FRAMES {
+        return Err(JsError::new("GIF trop long (trop de frames)"));
+    }
+
+    let first_buffer = frames[0].buffer();
+    let (first_w, first_h) = first_buffer.dimensions();
+    let target_height = compute_target_height(first_w, first_h, target_width)?;
+    let cells_per_frame = checked_ascii_cells_len(target_width, target_height)?;
+    let total_cells = cells_per_frame
+        .checked_mul(frames.len())
+        .ok_or_else(|| JsError::new("Overflow buffer chars"))?;
+    let total_rgb = total_cells
+        .checked_mul(3)
+        .ok_or_else(|| JsError::new("Overflow buffer rgb"))?;
+
+    let mut chars = Vec::with_capacity(total_cells);
+    let mut rgb = Vec::with_capacity(total_rgb);
+    let mut delays_ms = Vec::with_capacity(frames.len());
 
     for frame in frames {
-        let img_buffer = frame.buffer();
-        let dynamic_img = DynamicImage::ImageRgba8(img_buffer.clone());
-        let (width, height) = dynamic_img.dimensions();
-        
-        let aspect_ratio = (height as f32 / width as f32) * 0.55; 
-        let target_height = (target_width as f32 * aspect_ratio) as u32;
+        let delay = frame.delay();
+        let (delay_num, delay_den) = delay.numer_denom_ms();
+        let denom = delay_den.max(1);
+        let rounded_delay_ms = ((delay_num + (denom / 2)) / denom)
+            .max(1)
+            .min(u16::MAX as u32) as u16;
+        delays_ms.push(rounded_delay_ms);
 
+        let dynamic_img = DynamicImage::ImageRgba8(frame.into_buffer());
         let resized_img = dynamic_img.resize_exact(
-            target_width, 
-            target_height, 
-            image::imageops::FilterType::Nearest
+            target_width,
+            target_height,
+            image::imageops::FilterType::Nearest,
         );
 
-        let mut ascii_frame: Vec<AsciiPixel> = Vec::with_capacity((target_width * target_height) as usize);
-        
         for y in 0..target_height {
             for x in 0..target_width {
-                let pixel = resized_img.get_pixel(x, y);
-                let [red, green, blue, transparency] = pixel.0;
-
-                if transparency < 128 {
-                    ascii_frame.push(AsciiPixel {
-                        character: ' ',
-                        red: 0, green: 0, blue: 0,
-                    });
+                let [red, green, blue, alpha] = resized_img.get_pixel(x, y).0;
+                if alpha < 128 {
+                    chars.push(b' ');
+                    rgb.extend_from_slice(&[0, 0, 0]);
                 } else {
-                    let luminance = 0.299 * red as f32 + 0.587 * green as f32 + 0.114 * blue as f32;
-                    let char_index = ((luminance / 255.0) * (ASCII_CHARS.len() - 1) as f32) as usize;
-                    
-                    ascii_frame.push(AsciiPixel {
-                        character: ASCII_CHARS[char_index] as char,
-                        red, 
-                        green, 
-                        blue,
-                    });
+                    chars.push(ascii_byte_from_rgb(red, green, blue));
+                    rgb.extend_from_slice(&[red, green, blue]);
                 }
             }
         }
-        all_frames.push(ascii_frame);
     }
 
-    Ok(serde_wasm_bindgen::to_value(&all_frames)?)
+    let result = Object::new();
+    Reflect::set(
+        &result,
+        &JsValue::from_str("width"),
+        &JsValue::from_f64(target_width as f64),
+    )
+    .map_err(|_| JsError::new("Erreur création payload.width"))?;
+    Reflect::set(
+        &result,
+        &JsValue::from_str("height"),
+        &JsValue::from_f64(target_height as f64),
+    )
+    .map_err(|_| JsError::new("Erreur création payload.height"))?;
+    Reflect::set(
+        &result,
+        &JsValue::from_str("frameCount"),
+        &JsValue::from_f64(delays_ms.len() as f64),
+    )
+    .map_err(|_| JsError::new("Erreur création payload.frameCount"))?;
+    Reflect::set(
+        &result,
+        &JsValue::from_str("chars"),
+        &Uint8Array::from(chars.as_slice()).into(),
+    )
+    .map_err(|_| JsError::new("Erreur création payload.chars"))?;
+    Reflect::set(
+        &result,
+        &JsValue::from_str("rgb"),
+        &Uint8Array::from(rgb.as_slice()).into(),
+    )
+    .map_err(|_| JsError::new("Erreur création payload.rgb"))?;
+    Reflect::set(
+        &result,
+        &JsValue::from_str("delaysMs"),
+        &Uint16Array::from(delays_ms.as_slice()).into(),
+    )
+    .map_err(|_| JsError::new("Erreur création payload.delaysMs"))?;
+
+    Ok(result.into())
 }
 
 #[wasm_bindgen]
 pub fn process_image_to_ascii(image_bytes: &[u8], target_width: u32) -> Result<String, JsError> {
+    ensure_input_size(image_bytes)?;
+    ensure_target_width(target_width)?;
+
     let img = image::load_from_memory(image_bytes)
         .map_err(|e| JsError::new(&format!("Erreur image: {}", e)))?;
-    
-    let (width, height) = img.dimensions();
-    let aspect_ratio = (height as f32 / width as f32) * 0.55;
-    let target_height = (target_width as f32 * aspect_ratio) as u32;
 
-    let resized_img = img.resize_exact(target_width, target_height, image::imageops::FilterType::Nearest);
-    let mut ascii_art = String::new();
+    let (width, height) = img.dimensions();
+    let target_height = compute_target_height(width, height, target_width)?;
+
+    let resized_img = img.resize_exact(
+        target_width,
+        target_height,
+        image::imageops::FilterType::Nearest,
+    );
+    let mut ascii_art = String::with_capacity(((target_width + 1) * target_height) as usize);
 
     for y in 0..target_height {
         for x in 0..target_width {
@@ -96,15 +216,69 @@ pub fn process_image_to_ascii(image_bytes: &[u8], target_width: u32) -> Result<S
             if transparency < 128 {
                 ascii_art.push(' ');
             } else {
-                let luminance = 0.299 * red as f32 + 0.587 * green as f32 + 0.114 * blue as f32;
-                let char_index = ((luminance / 255.0) * (ASCII_CHARS.len() - 1) as f32) as usize;
-                ascii_art.push(ASCII_CHARS[char_index] as char);
+                ascii_art.push(ascii_byte_from_rgb(red, green, blue) as char);
             }
         }
         ascii_art.push('\n');
     }
 
     Ok(ascii_art)
+}
+
+#[wasm_bindgen]
+pub struct GifEncodeSession {
+    encoder: Option<RawGifEncoder<Cursor<Vec<u8>>>>,
+    width: u16,
+    height: u16,
+}
+
+#[wasm_bindgen]
+impl GifEncodeSession {
+    #[wasm_bindgen(constructor)]
+    pub fn new(width: u32, height: u32) -> Result<GifEncodeSession, JsError> {
+        let (w, h) = ensure_export_dimensions(width, height)?;
+        let mut encoder = RawGifEncoder::new(Cursor::new(Vec::new()), w, h, &[])
+            .map_err(|e| JsError::new(&format!("Erreur init GIF: {e}")))?;
+        encoder
+            .set_repeat(RawGifRepeat::Infinite)
+            .map_err(|e| JsError::new(&format!("Erreur boucle GIF: {e}")))?;
+        Ok(GifEncodeSession {
+            encoder: Some(encoder),
+            width: w,
+            height: h,
+        })
+    }
+
+    pub fn push_frame(&mut self, rgba_pixels: &[u8], delay_cs: u16) -> Result<(), JsError> {
+        let expected_len = checked_rgba_frame_len(self.width as u32, self.height as u32)?;
+        if rgba_pixels.len() != expected_len {
+            return Err(JsError::new("Taille frame RGBA invalide"));
+        }
+
+        let mut owned_pixels = rgba_pixels.to_vec();
+        let mut frame =
+            RawGifFrame::from_rgba_speed(self.width, self.height, &mut owned_pixels, 10);
+        frame.delay = delay_cs.max(1);
+
+        self.encoder
+            .as_mut()
+            .ok_or_else(|| JsError::new("Session encodeur fermée"))?
+            .write_frame(&frame)
+            .map_err(|e| JsError::new(&format!("Erreur encodage frame: {e}")))
+    }
+
+    pub fn finish(mut self) -> Result<js_sys::Uint8Array, JsError> {
+        let encoder = self
+            .encoder
+            .take()
+            .ok_or_else(|| JsError::new("Session encodeur déjà finalisée"))?;
+
+        let cursor = encoder
+            .into_inner()
+            .map_err(|e| JsError::new(&format!("Erreur finalisation GIF: {e}")))?;
+        let bytes = cursor.into_inner();
+        Ok(js_sys::Uint8Array::from(bytes.as_slice()))
+    }
 }
 
 #[wasm_bindgen]
@@ -115,35 +289,42 @@ pub fn encode_gif_from_pixels(
     frame_count: u32,
     delay_ms: u32,
 ) -> Result<js_sys::Uint8Array, JsError> {
-    let mut buffer = Vec::new();
-    
-    {
-        let mut encoder = GifEncoder::new(&mut buffer);
-        encoder.set_repeat(Repeat::Infinite)
-            .map_err(|e| JsError::new(&format!("Erreur boucle GIF: {}", e)))?;
-
-        let frame_size = (width * height * 4) as usize;
-
-        for i in 0..frame_count {
-            let start = (i as usize) * frame_size;
-            let end = start + frame_size;
-            
-            if end > flat_pixels.len() {
-                return Err(JsError::new("Buffer overflow: pas assez de pixels reçus"));
-            }
-
-            let frame_pixels = &flat_pixels[start..end];
-            
-            let img = RgbaImage::from_raw(width, height, frame_pixels.to_vec())
-                .ok_or_else(|| JsError::new("Erreur création image RGBA"))?;
-
-            let delay = Delay::from_numer_denom_ms(delay_ms, 1);
-            let frame = Frame::from_parts(img, 0, 0, delay);
-            
-            encoder.encode_frame(frame)
-                .map_err(|e| JsError::new(&format!("Erreur encodage frame: {}", e)))?;
-        }
+    if frame_count == 0 || frame_count as usize > MAX_GIF_FRAMES {
+        return Err(JsError::new("Nombre de frames export invalide"));
     }
-    
-    Ok(js_sys::Uint8Array::from(&buffer[..]))
+
+    let (w, h) = ensure_export_dimensions(width, height)?;
+    let frame_size = checked_rgba_frame_len(width, height)?;
+    let expected_len = frame_size
+        .checked_mul(frame_count as usize)
+        .ok_or_else(|| JsError::new("Overflow taille export"))?;
+
+    if flat_pixels.len() != expected_len {
+        return Err(JsError::new("Taille du buffer plat invalide"));
+    }
+
+    let mut encoder = RawGifEncoder::new(Cursor::new(Vec::new()), w, h, &[])
+        .map_err(|e| JsError::new(&format!("Erreur init GIF: {e}")))?;
+    encoder
+        .set_repeat(RawGifRepeat::Infinite)
+        .map_err(|e| JsError::new(&format!("Erreur boucle GIF: {e}")))?;
+
+    let delay_cs = delay_ms_to_cs(delay_ms);
+
+    for i in 0..frame_count as usize {
+        let start = i * frame_size;
+        let end = start + frame_size;
+        let mut owned_pixels = flat_pixels[start..end].to_vec();
+        let mut frame = RawGifFrame::from_rgba_speed(w, h, &mut owned_pixels, 10);
+        frame.delay = delay_cs;
+        encoder
+            .write_frame(&frame)
+            .map_err(|e| JsError::new(&format!("Erreur encodage frame: {e}")))?;
+    }
+
+    let cursor = encoder
+        .into_inner()
+        .map_err(|e| JsError::new(&format!("Erreur finalisation GIF: {e}")))?;
+    let bytes = cursor.into_inner();
+    Ok(js_sys::Uint8Array::from(bytes.as_slice()))
 }
