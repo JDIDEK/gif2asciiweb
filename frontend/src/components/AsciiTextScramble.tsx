@@ -1,50 +1,37 @@
 import React, { useState, useEffect } from 'react';
-import { useReducedMotion } from 'motion/react';
 
 interface Props {
   text: string;
   className?: string;
 }
 
-function scrambleText(text: string, chars: string) {
-  return text
-    .split('')
-    .map((char) =>
-      (char === ' ' || char === '\n') ? char : chars[Math.floor(Math.random() * chars.length)]
-    )
-    .join('');
-}
-
 export const AsciiTextScramble: React.FC<Props> = ({ text, className = "" }) => {
-  const shouldReduceMotion = useReducedMotion();
   const chars = '@#$%&8WM#*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\\|()1{}[]?-_+~<>i!lI;:,"^`\'. ';
   
   // On initialise en brouillant TOUT, sauf les espaces et les sauts de ligne !
-  const [displayText, setDisplayText] = useState(() => scrambleText(text, chars));
+  const [displayText, setDisplayText] = useState(() => 
+    text.split('').map(char => 
+      (char === ' ' || char === '\n') ? char : chars[Math.floor(Math.random() * chars.length)]
+    ).join('')
+  );
 
   useEffect(() => {
-    if (shouldReduceMotion) return;
-
     let iteration = 0;
-    let intervalId = 0;
-    const targetChars = text.split('');
-    const resetId = window.requestAnimationFrame(() => {
-      setDisplayText(scrambleText(text, chars));
-    });
+    let interval: ReturnType<typeof setInterval>;
     
     // Vitesse adaptée pour un grand bloc d'ASCII Art
     const increment = text.length / 40; 
 
     const timeout = setTimeout(() => {
-      intervalId = window.setInterval(() => {
-        setDisplayText(
-          targetChars
+      interval = setInterval(() => {
+        setDisplayText((prev) =>
+          text
+            .split('')
             .map((letter, index) => {
-              // Protéger la forme du dessin
               if (letter === ' ' || letter === '\n') return letter;
               
               if (index < iteration) {
-                return targetChars[index];
+                return text[index];
               }
               return chars[Math.floor(Math.random() * chars.length)];
             })
@@ -52,7 +39,7 @@ export const AsciiTextScramble: React.FC<Props> = ({ text, className = "" }) => 
         );
 
         if (iteration >= text.length) {
-          clearInterval(intervalId);
+          clearInterval(interval);
         }
 
         iteration += increment; 
@@ -60,11 +47,10 @@ export const AsciiTextScramble: React.FC<Props> = ({ text, className = "" }) => 
     }, 800); 
 
     return () => {
-      cancelAnimationFrame(resetId);
       clearTimeout(timeout);
-      clearInterval(intervalId);
+      clearInterval(interval);
     };
-  }, [chars, shouldReduceMotion, text]);
+  }, [text]);
 
-  return <pre className={`font-mono whitespace-pre ${className}`}>{shouldReduceMotion ? text : displayText}</pre>;
+  return <pre className={`font-mono whitespace-pre ${className}`}>{displayText}</pre>;
 };
