@@ -6,6 +6,9 @@ interface Props {
   animation: PackedAsciiAnimation | null;
   isDarkMode: boolean;
   frameDelayMs?: number;
+  selectedFrameIndex?: number;
+  isPlaying?: boolean;
+  onFrameChange?: (frameIndex: number) => void;
 }
 
 const FONT_SIZE = 10;
@@ -47,7 +50,14 @@ function drawAsciiFrame(
   }
 }
 
-export const AsciiViewer: React.FC<Props> = ({ animation, isDarkMode, frameDelayMs = 100 }) => {
+export const AsciiViewer: React.FC<Props> = ({
+  animation,
+  isDarkMode,
+  frameDelayMs = 100,
+  selectedFrameIndex,
+  isPlaying = true,
+  onFrameChange
+}) => {
   const shouldReduceMotion = useReducedMotion();
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -64,11 +74,16 @@ export const AsciiViewer: React.FC<Props> = ({ animation, isDarkMode, frameDelay
     if (!ctx) return;
 
     let rafId = 0;
-    let frameIndex = 0;
+    let frameIndex = Math.min(Math.max(selectedFrameIndex ?? 0, 0), animation.frameCount - 1);
     let last = performance.now();
     let accumulator = 0;
 
     drawAsciiFrame(ctx, animation, frameIndex, canvasWidth, canvasHeight, isDarkMode);
+
+    if (selectedFrameIndex !== undefined && !isPlaying) {
+      onFrameChange?.(frameIndex);
+      return undefined;
+    }
 
     const tick = (now: number) => {
       accumulator += now - last;
@@ -79,20 +94,21 @@ export const AsciiViewer: React.FC<Props> = ({ animation, isDarkMode, frameDelay
         accumulator -= activeDelay;
         frameIndex = (frameIndex + 1) % animation.frameCount;
         activeDelay = animation.delaysMs[frameIndex] || frameDelayMs;
+        onFrameChange?.(frameIndex);
       }
 
       drawAsciiFrame(ctx, animation, frameIndex, canvasWidth, canvasHeight, isDarkMode);
       rafId = requestAnimationFrame(tick);
     };
 
-    if (!shouldReduceMotion && animation.frameCount > 1) {
+    if (!shouldReduceMotion && animation.frameCount > 1 && isPlaying) {
       rafId = requestAnimationFrame(tick);
     }
 
     return () => {
       if (rafId) cancelAnimationFrame(rafId);
     };
-  }, [animation, frameDelayMs, isDarkMode, shouldReduceMotion]);
+  }, [animation, frameDelayMs, isDarkMode, isPlaying, onFrameChange, selectedFrameIndex, shouldReduceMotion]);
 
   if (!animation || animation.frameCount === 0) return null;
 

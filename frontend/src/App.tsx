@@ -133,6 +133,8 @@ const App: React.FC = () => {
   const [width, setWidth] = useState(100);
   const [renderPresetId, setRenderPresetId] = useState<AsciiRenderPresetId>('classic');
   const [sourceFile, setSourceFile] = useState<File | null>(null);
+  const [gifFrameIndex, setGifFrameIndex] = useState(0);
+  const [gifIsPlaying, setGifIsPlaying] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -197,11 +199,15 @@ const App: React.FC = () => {
           const animation = normalizePackedAnimation(rawResult);
           setGifAnimation(animation);
           setStaticAscii('');
+          setGifFrameIndex(0);
+          setGifIsPlaying(true);
         } else {
           const result = await process_image_to_ascii_with_preset(bytes, width, selectedPreset.wasmPreset);
           if (cancelled) return;
           setStaticAscii(result);
           setGifAnimation(null);
+          setGifFrameIndex(0);
+          setGifIsPlaying(true);
         }
       } catch (err) {
         if (!cancelled) {
@@ -519,12 +525,96 @@ const App: React.FC = () => {
                 transition={{ duration: shouldReduceMotion ? 0.2 : 1.2, ease: customEase }}
                 className="absolute inset-0 flex items-center justify-center bg-zinc-950 p-4"
               >
-                {staticAscii && (
-                  <div className="max-h-full max-w-full overflow-auto">
-                    <pre className="font-mono text-[5px] leading-tight text-zinc-300">{staticAscii}</pre>
+                <div className="flex h-full w-full flex-col gap-4">
+                  <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden">
+                    {staticAscii && (
+                      <div className="max-h-full max-w-full overflow-auto">
+                        <pre className="font-mono text-[5px] leading-tight text-zinc-300">{staticAscii}</pre>
+                      </div>
+                    )}
+                    {gifAnimation && (
+                      <AsciiViewer
+                        animation={gifAnimation}
+                        isDarkMode={true}
+                        frameDelayMs={FRAME_DELAY_MS}
+                        selectedFrameIndex={gifFrameIndex}
+                        isPlaying={gifIsPlaying}
+                        onFrameChange={setGifFrameIndex}
+                      />
+                    )}
                   </div>
-                )}
-                {gifAnimation && <AsciiViewer animation={gifAnimation} isDarkMode={true} frameDelayMs={FRAME_DELAY_MS} />}
+
+                  {gifAnimation && gifAnimation.frameCount > 1 && (
+                    <div className="shrink-0 rounded-2xl border border-zinc-800/70 bg-black/60 p-3 backdrop-blur-sm">
+                      <div className="flex flex-wrap items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={() => setGifIsPlaying((current) => !current)}
+                          className="rounded-full border border-zinc-700 px-3 py-1 text-[10px] font-bold uppercase tracking-widest text-zinc-200 transition-colors hover:border-orange-500 hover:text-orange-400"
+                        >
+                          {gifIsPlaying ? 'Pause timeline' : 'Play timeline'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setGifIsPlaying(false);
+                            setGifFrameIndex((current) => Math.max(0, current - 1));
+                          }}
+                          className="rounded-full border border-zinc-700 px-3 py-1 text-[10px] font-bold uppercase tracking-widest text-zinc-400 transition-colors hover:border-orange-500 hover:text-orange-400"
+                        >
+                          Prev
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setGifIsPlaying(false);
+                            setGifFrameIndex((current) => Math.min(gifAnimation.frameCount - 1, current + 1));
+                          }}
+                          className="rounded-full border border-zinc-700 px-3 py-1 text-[10px] font-bold uppercase tracking-widest text-zinc-400 transition-colors hover:border-orange-500 hover:text-orange-400"
+                        >
+                          Next
+                        </button>
+                        <span className="ml-auto text-[10px] font-mono uppercase tracking-widest text-zinc-500">
+                          Frame {gifFrameIndex + 1} / {gifAnimation.frameCount}
+                        </span>
+                      </div>
+
+                      <input
+                        type="range"
+                        min="0"
+                        max={Math.max(0, gifAnimation.frameCount - 1)}
+                        value={gifFrameIndex}
+                        onChange={(event) => {
+                          setGifIsPlaying(false);
+                          setGifFrameIndex(parseInt(event.target.value, 10));
+                        }}
+                        className="mt-3 h-1 w-full cursor-pointer appearance-none rounded-lg bg-zinc-800 accent-orange-500"
+                      />
+
+                      <div className="mt-3 grid max-h-24 grid-flow-col auto-cols-[minmax(2rem,1fr)] gap-2 overflow-x-auto pb-1">
+                        {gifAnimation.delaysMs.map((delay, index) => {
+                          const isActive = index === gifFrameIndex;
+                          return (
+                            <button
+                              key={`${index}-${delay}`}
+                              type="button"
+                              onClick={() => {
+                                setGifIsPlaying(false);
+                                setGifFrameIndex(index);
+                              }}
+                              className={`flex min-h-16 flex-col justify-between rounded-xl border p-2 text-left transition-colors ${isActive ? 'border-orange-500 bg-orange-500/10' : 'border-zinc-800 bg-zinc-950/70 hover:border-zinc-700 hover:bg-zinc-900/80'}`}
+                            >
+                              <span className={`text-[10px] font-bold uppercase tracking-widest ${isActive ? 'text-orange-400' : 'text-zinc-400'}`}>
+                                {index + 1}
+                              </span>
+                              <span className="text-[10px] font-mono text-zinc-500">{delay}ms</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
               </motion.div>
             ) : (
               <motion.div 
