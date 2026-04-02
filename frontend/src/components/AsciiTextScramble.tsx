@@ -3,54 +3,71 @@ import React, { useState, useEffect } from 'react';
 interface Props {
   text: string;
   className?: string;
+  startDelayMs?: number;
+  tickMs?: number;
+  revealDurationMs?: number;
 }
 
-export const AsciiTextScramble: React.FC<Props> = ({ text, className = "" }) => {
-  const chars = '@#$%&8WM#*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\\|()1{}[]?-_+~<>i!lI;:,"^`\'. ';
+const SCRAMBLE_CHARS = '@#$%&8WM#*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\\|()1{}[]?-_+~<>i!lI;:,"^`\'. ';
+
+export const AsciiTextScramble: React.FC<Props> = ({
+  text,
+  className = '',
+  startDelayMs = 400,
+  tickMs = 42,
+  revealDurationMs = 2000
+}) => {
   
   // On initialise en brouillant TOUT, sauf les espaces et les sauts de ligne !
-  const [displayText, setDisplayText] = useState(() => 
-    text.split('').map(char => 
-      (char === ' ' || char === '\n') ? char : chars[Math.floor(Math.random() * chars.length)]
+  const [displayText, setDisplayText] = useState(() =>
+    text.split('').map((char) =>
+      (char === ' ' || char === '\n') ? char : SCRAMBLE_CHARS[Math.floor(Math.random() * SCRAMBLE_CHARS.length)]
     ).join('')
   );
 
   useEffect(() => {
-    let iteration = 0;
+    let progress = 0;
     let interval: ReturnType<typeof setInterval>;
-    
-    // Vitesse adaptée pour un grand bloc d'ASCII Art
-    const increment = text.length / 40; 
 
-    const timeout = setTimeout(() => {
+    const totalTicks = Math.max(1, Math.round(revealDurationMs / tickMs));
+    const increment = text.length / totalTicks;
+
+    const timeout = window.setTimeout(() => {
       interval = setInterval(() => {
-        setDisplayText((prev) =>
+        setDisplayText(() =>
           text
             .split('')
             .map((letter, index) => {
               if (letter === ' ' || letter === '\n') return letter;
-              
-              if (index < iteration) {
+
+              if (index < progress) {
                 return text[index];
               }
-              return chars[Math.floor(Math.random() * chars.length)];
+
+              const noiseWeight = Math.min(1, Math.max(0, (index - progress) / 12));
+              if (Math.random() > noiseWeight) {
+                return text[index];
+              }
+
+              return SCRAMBLE_CHARS[Math.floor(Math.random() * SCRAMBLE_CHARS.length)];
             })
             .join('')
         );
 
-        if (iteration >= text.length) {
+        if (progress >= text.length) {
+          setDisplayText(text);
           clearInterval(interval);
         }
 
-        iteration += increment; 
-      }, 30);
-    }, 800); 
+        progress += increment;
+      }, tickMs);
+    }, startDelayMs);
 
     return () => {
       clearTimeout(timeout);
       clearInterval(interval);
     };
-  }, [text]);
+  }, [revealDurationMs, startDelayMs, text, tickMs]);
 
   return <pre className={`font-mono whitespace-pre ${className}`}>{displayText}</pre>;
 };

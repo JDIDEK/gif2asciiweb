@@ -6,3 +6,13 @@ export interface PackedAsciiAnimation {
   rgb: Uint8Array;
   delaysMs: Uint16Array;
 }
+
+export type AsciiRenderPresetId = 'classic' | 'manga' | 'neon' | 'terminal' | 'newspaper' | 'matrix';
+
+export interface AsciiRenderPreset {
+  id: AsciiRenderPresetId;
+  label: string;
+  description: string;
+  wasmPreset: string;
+  accent: string;
+}

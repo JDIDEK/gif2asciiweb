@@ -6,10 +6,71 @@ use std::io::Cursor;
 use wasm_bindgen::prelude::*;
 
 const ASCII_CHARS: &[u8] = b" .,:;+*?%#@";
+const MANGA_CHARS: &[u8] = b" .`'^,\":;Il!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$";
+const NEON_CHARS: &[u8] = b" .:-=+*#%@";
+const TERMINAL_CHARS: &[u8] = b" .`^,:;Il!i|/\\()[]{}<>+*xX#%@";
+const NEWSPAPER_CHARS: &[u8] = b" .,:;=!*#%@";
+const MATRIX_CHARS: &[u8] = b" 01/\\|[]{}<>~+=*#%@";
 const MAX_INPUT_BYTES: usize = 20 * 1024 * 1024;
 const MAX_TARGET_WIDTH: u32 = 300;
 const MAX_GIF_FRAMES: usize = 600;
 const MAX_EXPORT_PIXELS_PER_FRAME: u64 = 8_000_000;
+
+#[derive(Clone, Copy)]
+enum RenderPreset {
+    Classic,
+    Manga,
+    Neon,
+    Terminal,
+    Newspaper,
+    Matrix,
+}
+
+impl RenderPreset {
+    fn from_str(value: &str) -> Self {
+        match value {
+            "manga" => Self::Manga,
+            "neon" => Self::Neon,
+            "terminal" => Self::Terminal,
+            "newspaper" => Self::Newspaper,
+            "matrix" => Self::Matrix,
+            _ => Self::Classic,
+        }
+    }
+
+    fn chars(self) -> &'static [u8] {
+        match self {
+            Self::Classic => ASCII_CHARS,
+            Self::Manga => MANGA_CHARS,
+            Self::Neon => NEON_CHARS,
+            Self::Terminal => TERMINAL_CHARS,
+            Self::Newspaper => NEWSPAPER_CHARS,
+            Self::Matrix => MATRIX_CHARS,
+        }
+    }
+
+    fn color_boost(self) -> f32 {
+        match self {
+            Self::Classic => 1.0,
+            Self::Manga => 0.95,
+            Self::Neon => 1.25,
+            Self::Terminal => 0.9,
+            Self::Newspaper => 0.85,
+            Self::Matrix => 0.78,
+        }
+    }
+
+    fn contrast(self) -> f32 {
+        match self {
+            Self::Classic => 1.0,
+            Self::Manga => 1.12,
+            Self::Neon => 1.2,
+            Self::Terminal => 1.08,
+            Self::Newspaper => 1.18,
+            Self::Matrix => 1.25,
+        }
+    }
+}
 
 fn ensure_target_width(target_width: u32) -> Result<(), JsError> {
     if target_width == 0 || target_width > MAX_TARGET_WIDTH {
@@ -38,9 +99,30 @@ fn compute_target_height(
 }
 
 fn ascii_byte_from_rgb(red: u8, green: u8, blue: u8) -> u8 {
-    let luminance = 0.299 * red as f32 + 0.587 * green as f32 + 0.114 * blue as f32;
-    let idx = ((luminance / 255.0) * (ASCII_CHARS.len() - 1) as f32) as usize;
-    ASCII_CHARS[idx.min(ASCII_CHARS.len() - 1)]
+    ascii_byte_from_rgb_with_chars(red, green, blue, ASCII_CHARS, 1.0)
+}
+
+fn ascii_byte_from_rgb_with_chars(
+    red: u8,
+    green: u8,
+    blue: u8,
+    chars: &[u8],
+    contrast: f32,
+) -> u8 {
+    let luminance = (0.299 * red as f32 + 0.587 * green as f32 + 0.114 * blue as f32) / 255.0;
+    let mut adjusted = (luminance - 0.5) * contrast + 0.5;
+    adjusted = adjusted.clamp(0.0, 1.0);
+    let idx = (adjusted * (chars.len() - 1) as f32) as usize;
+    chars[idx.min(chars.len() - 1)]
+}
+
+fn boost_rgb(red: u8, green: u8, blue: u8, boost: f32) -> (u8, u8, u8) {
+    let clamp = |value: f32| value.clamp(0.0, 255.0) as u8;
+    (
+        clamp(red as f32 * boost),
+        clamp(green as f32 * boost),
+        clamp(blue as f32 * boost),
+    )
 }
 
 fn checked_ascii_cells_len(width: u32, height: u32) -> Result<usize, JsError> {
@@ -77,9 +159,12 @@ fn delay_ms_to_cs(delay_ms: u32) -> u16 {
 pub fn process_gif_to_ascii_color(
     image_bytes: &[u8],
     target_width: u32,
+    preset_name: &str,
 ) -> Result<JsValue, JsError> {
     ensure_input_size(image_bytes)?;
     ensure_target_width(target_width)?;
+    let preset = RenderPreset::from_str(preset_name);
+    let charset = preset.chars();
 
     if image_bytes.len() < 6
         || !(image_bytes.starts_with(b"GIF87a") || image_bytes.starts_with(b"GIF89a"))
@@ -142,8 +227,16 @@ pub fn process_gif_to_ascii_color(
                     chars.push(b' ');
                     rgb.extend_from_slice(&[0, 0, 0]);
                 } else {
-                    chars.push(ascii_byte_from_rgb(red, green, blue));
-                    rgb.extend_from_slice(&[red, green, blue]);
+                    let (boosted_red, boosted_green, boosted_blue) =
+                        boost_rgb(red, green, blue, preset.color_boost());
+                    chars.push(ascii_byte_from_rgb_with_chars(
+                        boosted_red,
+                        boosted_green,
+                        boosted_blue,
+                        charset,
+                        preset.contrast(),
+                    ));
+                    rgb.extend_from_slice(&[boosted_red, boosted_green, boosted_blue]);
                 }
             }
         }
@@ -192,8 +285,19 @@ pub fn process_gif_to_ascii_color(
 
 #[wasm_bindgen]
 pub fn process_image_to_ascii(image_bytes: &[u8], target_width: u32) -> Result<String, JsError> {
+    process_image_to_ascii_with_preset(image_bytes, target_width, "classic")
+}
+
+#[wasm_bindgen]
+pub fn process_image_to_ascii_with_preset(
+    image_bytes: &[u8],
+    target_width: u32,
+    preset_name: &str,
+) -> Result<String, JsError> {
     ensure_input_size(image_bytes)?;
     ensure_target_width(target_width)?;
+    let preset = RenderPreset::from_str(preset_name);
+    let charset = preset.chars();
 
     let img = image::load_from_memory(image_bytes)
         .map_err(|e| JsError::new(&format!("Erreur image: {}", e)))?;
@@ -216,7 +320,15 @@ pub fn process_image_to_ascii(image_bytes: &[u8], target_width: u32) -> Result<S
             if transparency < 128 {
                 ascii_art.push(' ');
             } else {
-                ascii_art.push(ascii_byte_from_rgb(red, green, blue) as char);
+                ascii_art.push(
+                    ascii_byte_from_rgb_with_chars(
+                        red,
+                        green,
+                        blue,
+                        charset,
+                        preset.contrast(),
+                    ) as char,
+                );
             }
         }
         ascii_art.push('\n');

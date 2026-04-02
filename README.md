@@ -8,14 +8,15 @@ This project combines:
 
 ## Table of Contents
 
-- Overview
-- Quick Start (Recommended)
-- How to Use
-- Useful Docker Commands
-- Local Development (Optional)
-- Project Structure
-- Troubleshooting
-- FAQ
+- [Overview](#overview)
+- [Quick Start (Recommended)](#quick-start-recommended)
+- [How to Use](#how-to-use)
+- [Docker Development (Hot Reload)](#docker-development-hot-reload)
+- [Useful Docker Commands](#useful-docker-commands)
+- [Local Development (Optional)](#local-development-optional)
+- [Project Structure](#project-structure)
+- [Troubleshooting](#troubleshooting)
+- [FAQ](#faq)
 
 ## Overview
 
@@ -55,6 +56,33 @@ docker compose down
 3. Adjust ASCII settings (density, rendering options, etc.).
 4. Preview the output in real time.
 5. Export as GIF.
+
+## Docker Development (Hot Reload)
+
+This mode runs Vite in a dev container with live reload on file changes.
+
+Requirements:
+- Docker Desktop / Docker Engine
+
+Start dev mode:
+
+```bash
+docker compose -f docker-compose.dev.yml up --build
+```
+
+Open:
+
+- http://localhost:5173
+
+Stop:
+
+```bash
+docker compose -f docker-compose.dev.yml down
+```
+
+Notes:
+- The container builds `wasm-core/pkg` at startup, then starts Vite.
+- Frontend file edits are reloaded automatically.
 
 ## Useful Docker Commands
 

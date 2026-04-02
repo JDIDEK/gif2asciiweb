@@ -1,0 +1,19 @@
+services:
+  app-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: gif2asciiweb:dev
+    working_dir: /workspace/frontend
+    ports:
+      - "5173:5173"
+    environment:
+      DOCKER: "1"
+      CHOKIDAR_USEPOLLING: "1"
+    volumes:
+      - ./:/workspace
+      - frontend_node_modules:/workspace/frontend/node_modules
+    restart: unless-stopped
+
+volumes:
+  frontend_node_modules:

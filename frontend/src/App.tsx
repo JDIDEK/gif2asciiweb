@@ -1,7 +1,7 @@
 import React, { useEffect, useId, useState } from 'react';
 import type { ChangeEvent } from 'react';
-import init, { process_gif_to_ascii_color, process_image_to_ascii } from 'wasm-core';
-import type { PackedAsciiAnimation } from './types/ascii';
+import init, { process_gif_to_ascii_color, process_image_to_ascii_with_preset } from 'wasm-core';
+import type { AsciiRenderPreset, AsciiRenderPresetId, PackedAsciiAnimation } from './types/ascii';
 
 // --- Composants ---
 import { AsciiViewer } from './components/AsciiViewer';
@@ -10,7 +10,7 @@ import { customEase } from './lib/motion';
 
 // --- UI & Icônes ---
 import { motion, AnimatePresence, useReducedMotion } from 'motion/react';
-import { Upload, Download, Settings2, Sparkles } from 'lucide-react';
+import { Upload, Download, Settings2, Sparkles, Feather, Code2, Newspaper, WandSparkles, ArrowUpNarrowWide } from 'lucide-react';
 
 const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024;
 const MAX_SOURCE_PIXELS = 16_000_000;
@@ -20,7 +20,16 @@ const FONT_SIZE = 10;
 const CHAR_WIDTH = 6;
 const CHAR_HEIGHT = 10;
 const CHAR_CACHE = Array.from({ length: 256 }, (_, index) => String.fromCharCode(index));
-const PRELOADER_MIN_MS = 900;
+const PRELOADER_MIN_MS = 2200;
+
+const RENDER_PRESETS: AsciiRenderPreset[] = [
+  { id: 'classic', label: 'Classic', description: 'Rendu équilibré et lisible.', wasmPreset: 'classic', accent: 'text-orange-500' },
+  { id: 'manga', label: 'Manga', description: 'Contraste plus net et texture dense.', wasmPreset: 'manga', accent: 'text-fuchsia-400' },
+  { id: 'neon', label: 'Neon', description: 'Boost de couleur et contours vifs.', wasmPreset: 'neon', accent: 'text-cyan-400' },
+  { id: 'terminal', label: 'Terminal', description: 'Vibe console sobre.', wasmPreset: 'terminal', accent: 'text-emerald-400' },
+  { id: 'newspaper', label: 'Newspaper', description: 'Look imprimé et contrasté.', wasmPreset: 'newspaper', accent: 'text-stone-300' },
+  { id: 'matrix', label: 'Matrix', description: 'Look sombre avec grain numérique.', wasmPreset: 'matrix', accent: 'text-lime-400' }
+];
 
 type ExportWorkerRequest =
   | { type: 'start'; width: number; height: number }
@@ -117,10 +126,13 @@ const App: React.FC = () => {
   const shouldReduceMotion = useReducedMotion();
   const uploadInputId = useId();
   const widthInputId = useId();
+  const presetInputId = useId();
   const statusRegionId = useId();
   const [gifAnimation, setGifAnimation] = useState<PackedAsciiAnimation | null>(null);
   const [staticAscii, setStaticAscii] = useState('');
   const [width, setWidth] = useState(100);
+  const [renderPresetId, setRenderPresetId] = useState<AsciiRenderPresetId>('classic');
+  const [sourceFile, setSourceFile] = useState<File | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -128,6 +140,7 @@ const App: React.FC = () => {
   
   // State pour le preloader
   const [appLoaded, setAppLoaded] = useState(false);
+  const selectedPreset = RENDER_PRESETS.find((preset) => preset.id === renderPresetId) ?? RENDER_PRESETS[0];
 
   useEffect(() => {
     let mounted = true;
@@ -160,6 +173,55 @@ const App: React.FC = () => {
     };
   }, [shouldReduceMotion]);
 
+  useEffect(() => {
+    if (!isWasmReady || !sourceFile) return;
+
+    let cancelled = false;
+    const renderSource = async () => {
+      setErrorMessage(null);
+      setIsLoading(true);
+
+      try {
+        const bitmap = await createImageBitmap(sourceFile);
+        const sourcePixels = bitmap.width * bitmap.height;
+        bitmap.close();
+
+        if (sourcePixels > MAX_SOURCE_PIXELS) {
+          throw new Error('Image trop grande. Réduis ses dimensions avant l’import.');
+        }
+
+        const bytes = new Uint8Array(await sourceFile.arrayBuffer());
+        if (sourceFile.type === 'image/gif') {
+          const rawResult = await process_gif_to_ascii_color(bytes, width, selectedPreset.wasmPreset);
+          if (cancelled) return;
+          const animation = normalizePackedAnimation(rawResult);
+          setGifAnimation(animation);
+          setStaticAscii('');
+        } else {
+          const result = await process_image_to_ascii_with_preset(bytes, width, selectedPreset.wasmPreset);
+          if (cancelled) return;
+          setStaticAscii(result);
+          setGifAnimation(null);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          console.error('Erreur WASM:', err);
+          setErrorMessage(err instanceof Error ? err.message : 'Erreur de traitement du fichier');
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoading(false);
+        }
+      }
+    };
+
+    void renderSource();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isWasmReady, selectedPreset.wasmPreset, sourceFile, width]);
+
   const handleFile = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -182,31 +244,7 @@ const App: React.FC = () => {
 
     setGifAnimation(null);
     setStaticAscii('');
-    setIsLoading(true);
-
-    try {
-      const bitmap = await createImageBitmap(file);
-      const sourcePixels = bitmap.width * bitmap.height;
-      bitmap.close();
-      if (sourcePixels > MAX_SOURCE_PIXELS) {
-        throw new Error('Image trop grande. Réduis ses dimensions avant l’import.');
-      }
-
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      if (file.type === 'image/gif') {
-        const rawResult = await process_gif_to_ascii_color(bytes, width);
-        const animation = normalizePackedAnimation(rawResult);
-        setGifAnimation(animation);
-      } else {
-        const result = await process_image_to_ascii(bytes, width);
-        setStaticAscii(result);
-      }
-    } catch (err) {
-      console.error('Erreur WASM:', err);
-      setErrorMessage(err instanceof Error ? err.message : 'Erreur de traitement du fichier');
-    } finally {
-      setIsLoading(false);
-    }
+    setSourceFile(file);
   };
 
   const handleExport = async () => {
@@ -326,6 +364,39 @@ const App: React.FC = () => {
               <div className="flex items-center gap-3 mb-8">
                 <Settings2 aria-hidden="true" className="h-4 w-4 text-orange-500" />
                 <h3 className="text-[10px] uppercase font-bold tracking-widest text-zinc-400">Engine Parameters</h3>
+              </div>
+
+              <div className="space-y-3 mb-6">
+                <div className="flex items-center justify-between text-[10px] uppercase font-mono text-zinc-500">
+                  <label htmlFor={presetInputId}>Render Pack</label>
+                  <span className={`font-semibold ${selectedPreset.accent}`}>{selectedPreset.label}</span>
+                </div>
+
+                <div id={presetInputId} className="grid grid-cols-2 gap-2 lg:grid-cols-3">
+                  {RENDER_PRESETS.map((preset) => {
+                    const isActive = preset.id === renderPresetId;
+
+                    return (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        onClick={() => setRenderPresetId(preset.id)}
+                        className={`rounded-xl border px-3 py-3 text-left transition-colors ${isActive ? 'border-orange-500 bg-orange-500/10' : 'border-zinc-800 bg-zinc-950/60 hover:border-zinc-700 hover:bg-zinc-900/80'}`}
+                      >
+                        <div className={`flex items-center gap-2 text-xs font-bold uppercase tracking-widest ${preset.accent}`}>
+                          {preset.id === 'classic' && <ArrowUpNarrowWide className="h-3 w-3" />}
+                          {preset.id === 'manga' && <Feather className="h-3 w-3" />}
+                          {preset.id === 'neon' && <Sparkles className="h-3 w-3" />}
+                          {preset.id === 'terminal' && <Code2 className="h-3 w-3" />}
+                          {preset.id === 'newspaper' && <Newspaper className="h-3 w-3" />}
+                          {preset.id === 'matrix' && <WandSparkles className="h-3 w-3" />}
+                          <span>{preset.label}</span>
+                        </div>
+                        <p className="mt-2 text-[10px] leading-relaxed text-zinc-500">{preset.description}</p>
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
               
               <div className="space-y-3">
