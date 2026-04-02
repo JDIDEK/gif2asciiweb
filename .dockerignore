@@ -1,0 +1,15 @@
+.git
+.gitignore
+
+**/node_modules
+**/dist
+
+wasm-core/target
+wasm-core/.cargo
+
+frontend/.vite
+frontend/.cache
+
+*.log
+*.tmp
+.DS_Store

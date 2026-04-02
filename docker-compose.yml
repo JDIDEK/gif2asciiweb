@@ -1,0 +1,9 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: gif2asciiweb:latest
+    ports:
+      - "8080:80"
+    restart: unless-stopped
