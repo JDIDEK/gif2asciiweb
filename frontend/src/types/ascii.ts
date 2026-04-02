@@ -16,3 +16,10 @@ export interface AsciiRenderPreset {
   wasmPreset: string;
   accent: string;
 }
+
+export interface SavedAsciiPreset {
+  id: string;
+  name: string;
+  renderPresetId: AsciiRenderPresetId;
+  width: number;
+}

@@ -15,6 +15,7 @@ const MAX_INPUT_BYTES: usize = 20 * 1024 * 1024;
 const MAX_TARGET_WIDTH: u32 = 300;
 const MAX_GIF_FRAMES: usize = 600;
 const MAX_EXPORT_PIXELS_PER_FRAME: u64 = 8_000_000;
+const FRAME_DELAY_MS: u16 = 100;
 
 #[derive(Clone, Copy)]
 enum RenderPreset {
@@ -335,6 +336,111 @@ pub fn process_image_to_ascii_with_preset(
     }
 
     Ok(ascii_art)
+}
+
+#[wasm_bindgen]
+pub fn process_rgba_frame_to_ascii_color_with_preset(
+    rgba_pixels: &[u8],
+    source_width: u32,
+    source_height: u32,
+    target_width: u32,
+    preset_name: &str,
+) -> Result<JsValue, JsError> {
+    ensure_input_size(rgba_pixels)?;
+    ensure_target_width(target_width)?;
+    if source_width == 0 || source_height == 0 {
+        return Err(JsError::new("Dimensions source invalides"));
+    }
+
+    let expected_len = (source_width as usize)
+        .checked_mul(source_height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| JsError::new("Overflow buffer RGBA"))?;
+    if rgba_pixels.len() != expected_len {
+        return Err(JsError::new("Taille RGBA invalide"));
+    }
+
+    let preset = RenderPreset::from_str(preset_name);
+    let charset = preset.chars();
+    let target_height = compute_target_height(source_width, source_height, target_width)?;
+    let cells = checked_ascii_cells_len(target_width, target_height)?;
+
+    let mut chars = Vec::with_capacity(cells);
+    let mut rgb = Vec::with_capacity(cells * 3);
+
+    for y in 0..target_height {
+        let sample_y = ((y as f32 / target_height as f32) * source_height as f32)
+            .floor()
+            .min((source_height - 1) as f32) as u32;
+
+        for x in 0..target_width {
+            let sample_x = ((x as f32 / target_width as f32) * source_width as f32)
+                .floor()
+                .min((source_width - 1) as f32) as u32;
+            let index = ((sample_y * source_width + sample_x) * 4) as usize;
+            let red = rgba_pixels[index];
+            let green = rgba_pixels[index + 1];
+            let blue = rgba_pixels[index + 2];
+            let alpha = rgba_pixels[index + 3];
+
+            if alpha < 128 {
+                chars.push(b' ');
+                rgb.extend_from_slice(&[0, 0, 0]);
+            } else {
+                let (boosted_red, boosted_green, boosted_blue) =
+                    boost_rgb(red, green, blue, preset.color_boost());
+                chars.push(ascii_byte_from_rgb_with_chars(
+                    boosted_red,
+                    boosted_green,
+                    boosted_blue,
+                    charset,
+                    preset.contrast(),
+                ));
+                rgb.extend_from_slice(&[boosted_red, boosted_green, boosted_blue]);
+            }
+        }
+    }
+
+    let result = Object::new();
+    Reflect::set(
+        &result,
+        &JsValue::from_str("width"),
+        &JsValue::from_f64(target_width as f64),
+    )
+    .map_err(|_| JsError::new("Erreur création payload.width"))?;
+    Reflect::set(
+        &result,
+        &JsValue::from_str("height"),
+        &JsValue::from_f64(target_height as f64),
+    )
+    .map_err(|_| JsError::new("Erreur création payload.height"))?;
+    Reflect::set(
+        &result,
+        &JsValue::from_str("frameCount"),
+        &JsValue::from_f64(1.0),
+    )
+    .map_err(|_| JsError::new("Erreur création payload.frameCount"))?;
+    Reflect::set(
+        &result,
+        &JsValue::from_str("chars"),
+        &Uint8Array::from(chars.as_slice()).into(),
+    )
+    .map_err(|_| JsError::new("Erreur création payload.chars"))?;
+    Reflect::set(
+        &result,
+        &JsValue::from_str("rgb"),
+        &Uint8Array::from(rgb.as_slice()).into(),
+    )
+    .map_err(|_| JsError::new("Erreur création payload.rgb"))?;
+    let delays_ms = vec![FRAME_DELAY_MS as u16];
+    Reflect::set(
+        &result,
+        &JsValue::from_str("delaysMs"),
+        &Uint16Array::from(delays_ms.as_slice()).into(),
+    )
+    .map_err(|_| JsError::new("Erreur création payload.delaysMs"))?;
+
+    Ok(result.into())
 }
 
 #[wasm_bindgen]

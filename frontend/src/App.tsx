@@ -1,16 +1,17 @@
-import React, { useEffect, useId, useState } from 'react';
+import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
-import init, { process_gif_to_ascii_color, process_image_to_ascii_with_preset } from 'wasm-core';
+import init, { process_gif_to_ascii_color, process_image_to_ascii_with_preset, process_rgba_frame_to_ascii_color_with_preset } from 'wasm-core';
 import type { AsciiRenderPreset, AsciiRenderPresetId, PackedAsciiAnimation } from './types/ascii';
 
 // --- Composants ---
 import { AsciiViewer } from './components/AsciiViewer';
+import { LiveWebcamPanel, type LiveGesture } from './components/LiveWebcamPanel';
 import { Preloader } from './components/Preloader';
 import { customEase } from './lib/motion';
 
-// --- UI & Icônes ---
+// --- UI ---
 import { motion, AnimatePresence, useReducedMotion } from 'motion/react';
-import { Upload, Download, Settings2, Sparkles, Feather, Code2, Newspaper, WandSparkles, ArrowUpNarrowWide } from 'lucide-react';
+import type { SavedAsciiPreset } from './types/ascii';
 
 const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024;
 const MAX_SOURCE_PIXELS = 16_000_000;
@@ -21,9 +22,12 @@ const CHAR_WIDTH = 6;
 const CHAR_HEIGHT = 10;
 const CHAR_CACHE = Array.from({ length: 256 }, (_, index) => String.fromCharCode(index));
 const PRELOADER_MIN_MS = 2200;
+const SAVED_PRESETS_STORAGE_KEY = 'fig2tig.savedPresets';
+
+type LeftPanelTab = 'source' | 'render' | 'saved';
 
 const RENDER_PRESETS: AsciiRenderPreset[] = [
-  { id: 'classic', label: 'Classic', description: 'Rendu équilibré et lisible.', wasmPreset: 'classic', accent: 'text-orange-500' },
+  { id: 'classic', label: 'Classic', description: 'Rendu équilibré et lisible.', wasmPreset: 'classic', accent: 'text-zinc-700' },
   { id: 'manga', label: 'Manga', description: 'Contraste plus net et texture dense.', wasmPreset: 'manga', accent: 'text-fuchsia-400' },
   { id: 'neon', label: 'Neon', description: 'Boost de couleur et contours vifs.', wasmPreset: 'neon', accent: 'text-cyan-400' },
   { id: 'terminal', label: 'Terminal', description: 'Vibe console sobre.', wasmPreset: 'terminal', accent: 'text-emerald-400' },
@@ -39,6 +43,42 @@ type ExportWorkerRequest =
 type ExportWorkerResponse =
   | { type: 'done'; gif: ArrayBuffer }
   | { type: 'error'; message: string };
+
+function createPresetId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `preset-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function loadSavedPresets(): SavedAsciiPreset[] {
+  if (typeof window === 'undefined') return [];
+
+  try {
+    const raw = window.localStorage.getItem(SAVED_PRESETS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed.filter((item): item is SavedAsciiPreset => {
+      if (!item || typeof item !== 'object') return false;
+      const candidate = item as SavedAsciiPreset;
+      return (
+        typeof candidate.id === 'string' &&
+        typeof candidate.name === 'string' &&
+        typeof candidate.renderPresetId === 'string' &&
+        typeof candidate.width === 'number'
+      );
+    });
+  } catch {
+    return [];
+  }
+}
+
+function persistSavedPresets(presets: SavedAsciiPreset[]) {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(SAVED_PRESETS_STORAGE_KEY, JSON.stringify(presets));
+}
 
 function asPositiveInt(value: unknown, field: string): number {
   const parsed = Number(value);
@@ -130,11 +170,15 @@ const App: React.FC = () => {
   const statusRegionId = useId();
   const [gifAnimation, setGifAnimation] = useState<PackedAsciiAnimation | null>(null);
   const [staticAscii, setStaticAscii] = useState('');
+  const [liveAnimation, setLiveAnimation] = useState<PackedAsciiAnimation | null>(null);
   const [width, setWidth] = useState(100);
   const [renderPresetId, setRenderPresetId] = useState<AsciiRenderPresetId>('classic');
   const [sourceFile, setSourceFile] = useState<File | null>(null);
   const [gifFrameIndex, setGifFrameIndex] = useState(0);
   const [gifIsPlaying, setGifIsPlaying] = useState(true);
+  const [presetName, setPresetName] = useState('My preset');
+  const [savedPresets, setSavedPresets] = useState<SavedAsciiPreset[]>(loadSavedPresets);
+  const [activeLeftTab, setActiveLeftTab] = useState<LeftPanelTab>('source');
   const [isLoading, setIsLoading] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -143,6 +187,112 @@ const App: React.FC = () => {
   // State pour le preloader
   const [appLoaded, setAppLoaded] = useState(false);
   const selectedPreset = RENDER_PRESETS.find((preset) => preset.id === renderPresetId) ?? RENDER_PRESETS[0];
+  const currentPresetLabel = `${selectedPreset.label} · ${width}px`;
+  const viewerAnimation = liveAnimation ?? gifAnimation;
+  const viewerStaticAscii = liveAnimation ? '' : staticAscii;
+  const liveConfigRef = useRef({ width, wasmPreset: selectedPreset.wasmPreset });
+  const liveGestureCooldownRef = useRef(0);
+  const [liveGestureFeedback, setLiveGestureFeedback] = useState<string | null>(null);
+
+  useEffect(() => {
+    liveConfigRef.current = { width, wasmPreset: selectedPreset.wasmPreset };
+  }, [selectedPreset.wasmPreset, width]);
+
+  const saveCurrentPreset = () => {
+    const trimmedName = presetName.trim();
+    if (!trimmedName) {
+      setErrorMessage('Donne un nom au preset avant de le sauvegarder.');
+      return;
+    }
+
+    const nextPreset: SavedAsciiPreset = {
+      id: createPresetId(),
+      name: trimmedName,
+      renderPresetId,
+      width
+    };
+
+    setSavedPresets((current) => {
+      const next = [nextPreset, ...current].slice(0, 12);
+      persistSavedPresets(next);
+      return next;
+    });
+    setErrorMessage(null);
+  };
+
+  const applySavedPreset = (preset: SavedAsciiPreset) => {
+    setRenderPresetId(preset.renderPresetId);
+    setWidth(preset.width);
+    setPresetName(preset.name);
+  };
+
+  const deleteSavedPreset = (presetId: string) => {
+    setSavedPresets((current) => {
+      const next = current.filter((preset) => preset.id !== presetId);
+      persistSavedPresets(next);
+      return next;
+    });
+  };
+
+  const handleLiveFrame = useCallback((rgbaPixels: Uint8Array | null, sourceWidth?: number, sourceHeight?: number) => {
+    if (!rgbaPixels || !sourceWidth || !sourceHeight) {
+      setLiveAnimation(null);
+      return;
+    }
+
+    try {
+      const { width: liveWidth, wasmPreset } = liveConfigRef.current;
+      const rawResult = process_rgba_frame_to_ascii_color_with_preset(
+        rgbaPixels,
+        sourceWidth,
+        sourceHeight,
+        liveWidth,
+        wasmPreset
+      );
+      setLiveAnimation(rawResult as PackedAsciiAnimation);
+      setGifAnimation(null);
+      setStaticAscii('');
+    } catch (error) {
+      console.error('Erreur live webcam:', error);
+      setErrorMessage(error instanceof Error ? error.message : 'Erreur webcam');
+      setLiveAnimation(null);
+    }
+  }, []);
+
+  const handleLiveGesture = useCallback((gesture: LiveGesture) => {
+    const now = Date.now();
+    if (now < liveGestureCooldownRef.current) return;
+    liveGestureCooldownRef.current = now + 900;
+
+    if (gesture === 'next_preset') {
+      setRenderPresetId((current) => {
+        const currentIndex = RENDER_PRESETS.findIndex((preset) => preset.id === current);
+        const nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % RENDER_PRESETS.length;
+        return RENDER_PRESETS[nextIndex].id;
+      });
+      setLiveGestureFeedback('Gesture: next preset');
+      return;
+    }
+
+    if (gesture === 'prev_preset') {
+      setRenderPresetId((current) => {
+        const currentIndex = RENDER_PRESETS.findIndex((preset) => preset.id === current);
+        const nextIndex = currentIndex <= 0 ? RENDER_PRESETS.length - 1 : currentIndex - 1;
+        return RENDER_PRESETS[nextIndex].id;
+      });
+      setLiveGestureFeedback('Gesture: previous preset');
+      return;
+    }
+
+    if (gesture === 'increase_capture') {
+      setWidth((current) => Math.min(150, current + 8));
+      setLiveGestureFeedback('Gesture: bigger capture');
+      return;
+    }
+
+    setWidth((current) => Math.max(40, current - 8));
+    setLiveGestureFeedback('Gesture: smaller capture');
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -250,7 +400,9 @@ const App: React.FC = () => {
 
     setGifAnimation(null);
     setStaticAscii('');
+    setLiveAnimation(null);
     setSourceFile(file);
+    setActiveLeftTab('source');
   };
 
   const handleExport = async () => {
@@ -330,7 +482,7 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen overflow-x-hidden bg-black text-zinc-100 font-sans selection:bg-orange-500 selection:text-white bg-grain">
+    <div className="min-h-screen overflow-x-hidden bg-[#f7f6f1] text-zinc-900 font-sans selection:bg-zinc-900 selection:text-white bg-grain">
       <a
         href="#main-content"
         className="sr-only z-50 rounded-full bg-white px-4 py-2 text-sm font-semibold text-black focus:not-sr-only focus:fixed focus:left-4 focus:top-4"
@@ -344,7 +496,7 @@ const App: React.FC = () => {
       {/* 2. THE MAIN LAYOUT */}
       <main
         id="main-content"
-        className="relative z-10 flex min-h-screen w-full flex-col gap-8 p-4 md:p-8 lg:h-screen lg:flex-row"
+        className="relative z-10 flex min-h-screen w-full flex-col gap-8 p-4 md:p-6 lg:h-screen lg:flex-row"
       >
         
         {/* COLONNE GAUCHE: Contrôles & Typo */}
@@ -352,144 +504,208 @@ const App: React.FC = () => {
           initial={shouldReduceMotion ? false : { opacity: 0, x: -50 }}
           animate={appLoaded ? { opacity: 1, x: 0 } : {}}
           transition={{ duration: shouldReduceMotion ? 0.2 : 1.2, ease: customEase, delay: shouldReduceMotion ? 0 : 0.4 }}
-          className="flex flex-1 flex-col justify-between"
+          className="flex w-full max-w-[480px] shrink-0 flex-col justify-between lg:basis-[420px]"
         >
           <header className="pt-4">
-            <h1 className="text-6xl font-black leading-[0.85] tracking-tighter text-white md:text-[5.5rem]">
+            <h1 className="text-5xl font-black leading-[0.85] tracking-tight text-zinc-900 md:text-[5.6rem]">
               ASCII <br/> 
-              <span className="text-orange-500 italic font-serif font-light tracking-normal">Masterpiece.</span>
+              <span className="font-serif font-light tracking-normal text-zinc-700">Masterpiece.</span>
             </h1>
-            <p className="mt-8 max-w-sm text-xs uppercase leading-relaxed text-zinc-500 font-mono">
-              High-performance WebAssembly engine. <br/> converting pixels into typography at 60fps.
+            <p className="mt-8 max-w-sm text-[10px] uppercase leading-relaxed text-zinc-500 font-mono">
+              WebAssembly ASCII renderer.
             </p>
           </header>
 
-          <div className="space-y-6 mt-12 lg:mt-0 pb-4">
-            {/* Panneau de configuration */}
-            <div className="group relative rounded-2xl border border-zinc-800/80 bg-zinc-900/30 p-6 backdrop-blur-md transition-colors hover:border-zinc-700 hover:bg-zinc-900/50">
-              <div className="flex items-center gap-3 mb-8">
-                <Settings2 aria-hidden="true" className="h-4 w-4 text-orange-500" />
-                <h3 className="text-[10px] uppercase font-bold tracking-widest text-zinc-400">Engine Parameters</h3>
-              </div>
-
-              <div className="space-y-3 mb-6">
-                <div className="flex items-center justify-between text-[10px] uppercase font-mono text-zinc-500">
-                  <label htmlFor={presetInputId}>Render Pack</label>
-                  <span className={`font-semibold ${selectedPreset.accent}`}>{selectedPreset.label}</span>
-                </div>
-
-                <div id={presetInputId} className="grid grid-cols-2 gap-2 lg:grid-cols-3">
-                  {RENDER_PRESETS.map((preset) => {
-                    const isActive = preset.id === renderPresetId;
-
-                    return (
-                      <button
-                        key={preset.id}
-                        type="button"
-                        onClick={() => setRenderPresetId(preset.id)}
-                        className={`rounded-xl border px-3 py-3 text-left transition-colors ${isActive ? 'border-orange-500 bg-orange-500/10' : 'border-zinc-800 bg-zinc-950/60 hover:border-zinc-700 hover:bg-zinc-900/80'}`}
-                      >
-                        <div className={`flex items-center gap-2 text-xs font-bold uppercase tracking-widest ${preset.accent}`}>
-                          {preset.id === 'classic' && <ArrowUpNarrowWide className="h-3 w-3" />}
-                          {preset.id === 'manga' && <Feather className="h-3 w-3" />}
-                          {preset.id === 'neon' && <Sparkles className="h-3 w-3" />}
-                          {preset.id === 'terminal' && <Code2 className="h-3 w-3" />}
-                          {preset.id === 'newspaper' && <Newspaper className="h-3 w-3" />}
-                          {preset.id === 'matrix' && <WandSparkles className="h-3 w-3" />}
-                          <span>{preset.label}</span>
-                        </div>
-                        <p className="mt-2 text-[10px] leading-relaxed text-zinc-500">{preset.description}</p>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-              
-              <div className="space-y-3">
-                <div className="flex justify-between items-end text-[10px] uppercase font-mono text-zinc-500">
-                  <label htmlFor={widthInputId}>Resolution Matrix</label>
-                  <span className="text-lg font-sans leading-none tracking-tighter tabular-nums text-white">
-                    {width}
-                    <span className="ml-1 text-[10px] text-zinc-600">px</span>
-                  </span>
-                </div>
-                <input
-                  id={widthInputId}
-                  name="output-width"
-                  type="range"
-                  min="40"
-                  max="150"
-                  value={width}
-                  onChange={(e) => setWidth(parseInt(e.target.value, 10))}
-                  className="h-1 w-full cursor-pointer appearance-none rounded-lg bg-zinc-800 accent-orange-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-orange-500"
-                />
-              </div>
+          <div className="mt-10 flex-1">
+            <div className="flex flex-col gap-3 text-xs font-bold uppercase tracking-widest text-zinc-600">
+              {([
+                ['source', 'Source'],
+                ['render', 'Render'],
+                ['saved', 'Saved']
+              ] as const).map(([tabId, label]) => (
+                <button
+                  key={tabId}
+                  type="button"
+                  onClick={() => setActiveLeftTab(tabId)}
+                  className={`w-full rounded-none border px-5 py-4 text-left transition-colors ${activeLeftTab === tabId ? 'border-zinc-900 bg-zinc-100 text-zinc-900' : 'border-zinc-300 bg-white text-zinc-500 hover:border-zinc-500 hover:text-zinc-900'}`}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
 
-            {/* Boutons d'Action Magnétiques */}
-            <div className="grid grid-cols-2 gap-4">
-              <label
-                htmlFor={uploadInputId}
-                className="group relative flex h-28 touch-manipulation flex-col items-center justify-center overflow-hidden rounded-2xl border border-dashed border-zinc-800 bg-black/50 transition-colors hover:border-orange-500/50 focus-within:border-orange-500 focus-within:ring-2 focus-within:ring-orange-500/40"
-              >
-                <input
-                  id={uploadInputId}
-                  name="media-upload"
-                  type="file"
-                  accept="image/gif,image/png,image/jpeg,image/webp"
-                  onChange={handleFile}
-                  aria-describedby={statusRegionId}
-                  className="sr-only"
-                />
-                <motion.div
-                  whileHover={!shouldReduceMotion ? { y: -2 } : undefined}
-                  className="flex flex-col items-center gap-3"
-                >
-                  <Upload aria-hidden="true" className="h-5 w-5 text-zinc-500 transition-colors group-hover:text-orange-400" />
-                  <span className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 group-hover:text-orange-400 transition-colors">Upload Media</span>
-                </motion.div>
-                <div className="absolute inset-0 bg-orange-500/5 translate-y-full group-hover:translate-y-0 transition-transform duration-500 ease-out" />
-              </label>
+            <div className="mt-5 rounded-none border border-zinc-300 bg-white p-5 shadow-sm">
+              {activeLeftTab === 'source' && (
+                <div className="space-y-4">
+                  <div className="space-y-3 border border-zinc-300 bg-white p-4">
+                    <h3 className="text-[10px] uppercase font-bold tracking-widest text-zinc-500">Source Input</h3>
+                    <label
+                      htmlFor={uploadInputId}
+                      className="flex cursor-pointer flex-col gap-2 border border-zinc-300 bg-white p-4 transition-colors hover:border-zinc-900"
+                    >
+                      <input
+                        id={uploadInputId}
+                        name="media-upload"
+                        type="file"
+                        accept="image/gif,image/png,image/jpeg,image/webp"
+                        onChange={handleFile}
+                        aria-describedby={statusRegionId}
+                        className="sr-only"
+                      />
+                      <span className="text-sm font-semibold text-zinc-900">Upload image or GIF</span>
+                      <span className="text-[10px] uppercase tracking-widest text-zinc-500">GIF, PNG, JPEG, WebP</span>
+                    </label>
+                  </div>
 
-              <button
-                type="button"
-                onClick={handleExport}
-                disabled={isExporting || !gifAnimation || !isWasmReady}
-                className="group relative flex h-28 touch-manipulation flex-col items-center justify-center overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/50 transition-colors hover:border-orange-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-orange-500 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                <motion.div
-                  whileHover={!shouldReduceMotion && !isExporting && !!gifAnimation ? { y: -2 } : undefined}
-                  className="relative z-10 flex flex-col items-center gap-3"
-                >
-                  {isExporting ? (
-                    <Sparkles aria-hidden="true" className="h-5 w-5 motion-safe:animate-pulse text-black" />
-                  ) : (
-                    <Download aria-hidden="true" className="h-5 w-5 text-orange-500 transition-colors group-hover:text-black" />
+                  <LiveWebcamPanel
+                    isWasmReady={isWasmReady}
+                    onFrame={handleLiveFrame}
+                    onGesture={handleLiveGesture}
+                  />
+
+                  {liveGestureFeedback && (
+                    <p className="text-[10px] uppercase tracking-widest text-zinc-500">{liveGestureFeedback}</p>
                   )}
-                  <span className={`text-[10px] font-bold uppercase tracking-widest transition-colors ${isExporting ? 'text-black' : 'text-zinc-300 group-hover:text-black'}`}>
-                    {isExporting ? 'Encoding…' : 'Export GIF'}
-                  </span>
-                </motion.div>
-                <div className="absolute inset-0 bg-orange-500 translate-y-full group-hover:translate-y-0 transition-transform duration-500 ease-out z-0" />
-              </button>
-            </div>
 
-            <p id={statusRegionId} className="text-[10px] uppercase tracking-widest text-zinc-500 font-mono">
-              Upload GIF, PNG, JPEG or WebP. GIF export is available for animated GIF inputs only.
-            </p>
-            
-            {errorMessage && (
-              <motion.div
-                initial={shouldReduceMotion ? false : { opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: 'auto' }}
-                aria-live="polite"
-                aria-atomic="true"
-                role="status"
-                className="mt-4 rounded-xl border border-red-900/30 bg-red-950/20 p-3 text-[10px] uppercase tracking-wider text-red-400 font-mono"
-              >
-                <span className="mr-2 font-bold">Erreur:</span> {errorMessage}
-              </motion.div>
-            )}
+                  <button
+                    type="button"
+                    onClick={handleExport}
+                    disabled={isExporting || !gifAnimation || !isWasmReady || !!liveAnimation}
+                    className="w-full rounded-none border border-zinc-300 bg-white px-4 py-4 text-[10px] font-bold uppercase tracking-widest text-zinc-700 transition-colors hover:border-zinc-900 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {isExporting ? 'Encoding...' : 'Download GIF'}
+                  </button>
+
+                  <p id={statusRegionId} className="text-[10px] uppercase tracking-widest text-zinc-500 font-mono">
+                    Upload a file or start the webcam. GIF export is disabled in live mode.
+                  </p>
+                </div>
+              )}
+
+              {activeLeftTab === 'render' && (
+                <div className="space-y-4">
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between text-[10px] uppercase font-mono text-zinc-500">
+                      <label htmlFor={presetInputId}>Render Pack</label>
+                      <span className="font-semibold text-zinc-700">{selectedPreset.label}</span>
+                    </div>
+
+                    <div id={presetInputId} className="grid grid-cols-2 gap-2 lg:grid-cols-3">
+                      {RENDER_PRESETS.map((preset) => {
+                        const isActive = preset.id === renderPresetId;
+
+                        return (
+                          <button
+                            key={preset.id}
+                            type="button"
+                            onClick={() => setRenderPresetId(preset.id)}
+                            className={`rounded-none border px-3 py-3 text-left transition-colors ${isActive ? 'border-zinc-900 bg-zinc-100' : 'border-zinc-300 bg-white hover:border-zinc-900'}`}
+                          >
+                            <div className="text-xs font-bold uppercase tracking-widest text-zinc-900">
+                              {preset.label}
+                            </div>
+                            <p className="mt-2 text-[10px] leading-relaxed text-zinc-500">{preset.description}</p>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="border border-zinc-300 bg-white px-4 py-3 text-[10px] uppercase tracking-widest text-zinc-500">
+                    Active: <span className="font-semibold text-zinc-900">{currentPresetLabel}</span>
+                  </div>
+
+                  <div className="space-y-3">
+                    <div className="flex justify-between items-end text-[10px] uppercase font-mono text-zinc-500">
+                      <label htmlFor={widthInputId}>Resolution Matrix</label>
+                      <span className="text-lg font-sans leading-none tracking-tighter tabular-nums text-white">
+                        {width}
+                        <span className="ml-1 text-[10px] text-zinc-600">px</span>
+                      </span>
+                    </div>
+                    <input
+                      id={widthInputId}
+                      name="output-width"
+                      type="range"
+                      min="40"
+                      max="150"
+                      value={width}
+                      onChange={(e) => setWidth(parseInt(e.target.value, 10))}
+                      className="h-1 w-full cursor-pointer appearance-none rounded-lg bg-zinc-800 accent-zinc-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-zinc-900"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {activeLeftTab === 'saved' && (
+                <div className="space-y-4">
+                  <div className="space-y-3 border border-zinc-300 bg-white p-4">
+                    <div className="flex items-center justify-between gap-3 text-[10px] uppercase font-mono text-zinc-500">
+                      <span>Saved Presets</span>
+                      <span className="text-zinc-600">{savedPresets.length}/12</span>
+                    </div>
+
+                    <div className="flex flex-col gap-3 sm:flex-row">
+                      <input
+                        type="text"
+                        value={presetName}
+                        onChange={(event) => setPresetName(event.target.value)}
+                        placeholder="Preset name"
+                        className="min-w-0 flex-1 rounded-none border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder:text-zinc-500 focus:border-zinc-900 focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={saveCurrentPreset}
+                        className="rounded-none border border-zinc-900 bg-zinc-900 px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-white transition-colors hover:bg-white hover:text-zinc-900"
+                      >
+                        Save Current
+                      </button>
+                    </div>
+                  </div>
+
+                  {savedPresets.length > 0 ? (
+                    <div className="grid gap-2">
+                      {savedPresets.map((preset) => (
+                        <div key={preset.id} className="flex items-center gap-2 border border-zinc-300 bg-white p-2">
+                          <button
+                            type="button"
+                            onClick={() => applySavedPreset(preset)}
+                            className="min-w-0 flex-1 text-left"
+                          >
+                            <div className="truncate text-sm font-semibold text-zinc-900">{preset.name}</div>
+                            <div className="text-[10px] uppercase tracking-widest text-zinc-500">
+                              {RENDER_PRESETS.find((renderPreset) => renderPreset.id === preset.renderPresetId)?.label ?? 'Classic'} · {preset.width}px
+                            </div>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => deleteSavedPreset(preset.id)}
+                            className="rounded-none border border-zinc-300 px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-zinc-500 transition-colors hover:border-zinc-900 hover:text-zinc-900"
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-[10px] uppercase tracking-widest text-zinc-600">No saved preset yet.</p>
+                  )}
+                </div>
+              )}
+
+              {errorMessage && (
+                <motion.div
+                  initial={shouldReduceMotion ? false : { opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: 'auto' }}
+                  aria-live="polite"
+                  aria-atomic="true"
+                  role="status"
+                  className="mt-4 rounded-xl border border-red-900/30 bg-red-950/20 p-3 text-[10px] uppercase tracking-wider text-red-400 font-mono"
+                >
+                  <span className="mr-2 font-bold">Erreur:</span> {errorMessage}
+                </motion.div>
+              )}
+            </div>
           </div>
         </motion.div>
 
@@ -498,7 +714,7 @@ const App: React.FC = () => {
           initial={shouldReduceMotion ? false : { opacity: 0, scale: 0.95 }}
           animate={appLoaded ? { opacity: 1, scale: 1 } : {}}
           transition={{ duration: shouldReduceMotion ? 0.2 : 1.2, ease: customEase, delay: shouldReduceMotion ? 0 : 0.6 }}
-          className="relative h-[50vh] min-h-[24rem] flex-[1.8] overflow-hidden rounded-4xl border border-zinc-800/50 bg-black shadow-2xl lg:h-full"
+          className="relative h-[50vh] min-h-[24rem] flex-[1.8] overflow-hidden rounded-none border border-zinc-300 bg-white shadow-none lg:h-full"
         >
           <AnimatePresence mode="wait">
             {isLoading ? (
@@ -510,31 +726,31 @@ const App: React.FC = () => {
                 aria-live="polite"
                 aria-atomic="true"
                 role="status"
-                className="absolute inset-0 z-20 flex items-center justify-center bg-black"
+                className="absolute inset-0 z-20 flex items-center justify-center bg-white"
               >
                 <div className="flex flex-col items-center gap-4">
-                  <div className="h-8 w-8 rounded-full border-2 border-orange-500 border-t-transparent motion-safe:animate-spin" />
-                  <p className="text-[10px] font-mono uppercase tracking-widest text-zinc-500">Processing Pixels…</p>
+                  <div className="h-8 w-8 rounded-full border-2 border-zinc-900 border-t-transparent motion-safe:animate-spin" />
+                  <p className="text-[10px] font-mono uppercase tracking-widest text-zinc-700">Processing Pixels...</p>
                 </div>
               </motion.div>
-            ) : gifAnimation || staticAscii ? (
+            ) : viewerAnimation || viewerStaticAscii ? (
               <motion.div
                 key="viewer"
                 initial={shouldReduceMotion ? false : { clipPath: "polygon(0 100%, 100% 100%, 100% 100%, 0% 100%)" }}
                 animate={{ clipPath: "polygon(0 0, 100% 0, 100% 100%, 0% 100%)" }}
                 transition={{ duration: shouldReduceMotion ? 0.2 : 1.2, ease: customEase }}
-                className="absolute inset-0 flex items-center justify-center bg-zinc-950 p-4"
+                className="absolute inset-0 flex items-center justify-center bg-white p-4"
               >
                 <div className="flex h-full w-full flex-col gap-4">
                   <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden">
-                    {staticAscii && (
+                    {viewerStaticAscii && (
                       <div className="max-h-full max-w-full overflow-auto">
-                        <pre className="font-mono text-[5px] leading-tight text-zinc-300">{staticAscii}</pre>
+                        <pre className="font-mono text-[5px] leading-tight text-zinc-900">{viewerStaticAscii}</pre>
                       </div>
                     )}
-                    {gifAnimation && (
+                    {viewerAnimation && (
                       <AsciiViewer
-                        animation={gifAnimation}
+                        animation={viewerAnimation}
                         isDarkMode={true}
                         frameDelayMs={FRAME_DELAY_MS}
                         selectedFrameIndex={gifFrameIndex}
@@ -544,13 +760,13 @@ const App: React.FC = () => {
                     )}
                   </div>
 
-                  {gifAnimation && gifAnimation.frameCount > 1 && (
-                    <div className="shrink-0 rounded-2xl border border-zinc-800/70 bg-black/60 p-3 backdrop-blur-sm">
+                  {gifAnimation && gifAnimation.frameCount > 1 && !liveAnimation && (
+                    <div className="shrink-0 border border-zinc-300 bg-white p-3">
                       <div className="flex flex-wrap items-center gap-3">
                         <button
                           type="button"
                           onClick={() => setGifIsPlaying((current) => !current)}
-                          className="rounded-full border border-zinc-700 px-3 py-1 text-[10px] font-bold uppercase tracking-widest text-zinc-200 transition-colors hover:border-orange-500 hover:text-orange-400"
+                          className="rounded-none border border-zinc-300 px-3 py-1 text-[10px] font-bold uppercase tracking-widest text-zinc-700 transition-colors hover:border-zinc-900 hover:text-zinc-900"
                         >
                           {gifIsPlaying ? 'Pause timeline' : 'Play timeline'}
                         </button>
@@ -560,7 +776,7 @@ const App: React.FC = () => {
                             setGifIsPlaying(false);
                             setGifFrameIndex((current) => Math.max(0, current - 1));
                           }}
-                          className="rounded-full border border-zinc-700 px-3 py-1 text-[10px] font-bold uppercase tracking-widest text-zinc-400 transition-colors hover:border-orange-500 hover:text-orange-400"
+                          className="rounded-none border border-zinc-300 px-3 py-1 text-[10px] font-bold uppercase tracking-widest text-zinc-700 transition-colors hover:border-zinc-900 hover:text-zinc-900"
                         >
                           Prev
                         </button>
@@ -570,7 +786,7 @@ const App: React.FC = () => {
                             setGifIsPlaying(false);
                             setGifFrameIndex((current) => Math.min(gifAnimation.frameCount - 1, current + 1));
                           }}
-                          className="rounded-full border border-zinc-700 px-3 py-1 text-[10px] font-bold uppercase tracking-widest text-zinc-400 transition-colors hover:border-orange-500 hover:text-orange-400"
+                          className="rounded-none border border-zinc-300 px-3 py-1 text-[10px] font-bold uppercase tracking-widest text-zinc-700 transition-colors hover:border-zinc-900 hover:text-zinc-900"
                         >
                           Next
                         </button>
@@ -588,30 +804,14 @@ const App: React.FC = () => {
                           setGifIsPlaying(false);
                           setGifFrameIndex(parseInt(event.target.value, 10));
                         }}
-                        className="mt-3 h-1 w-full cursor-pointer appearance-none rounded-lg bg-zinc-800 accent-orange-500"
+                        className="mt-3 h-1 w-full cursor-pointer appearance-none rounded-none bg-zinc-300 accent-zinc-900"
                       />
+                    </div>
+                  )}
 
-                      <div className="mt-3 grid max-h-24 grid-flow-col auto-cols-[minmax(2rem,1fr)] gap-2 overflow-x-auto pb-1">
-                        {gifAnimation.delaysMs.map((delay, index) => {
-                          const isActive = index === gifFrameIndex;
-                          return (
-                            <button
-                              key={`${index}-${delay}`}
-                              type="button"
-                              onClick={() => {
-                                setGifIsPlaying(false);
-                                setGifFrameIndex(index);
-                              }}
-                              className={`flex min-h-16 flex-col justify-between rounded-xl border p-2 text-left transition-colors ${isActive ? 'border-orange-500 bg-orange-500/10' : 'border-zinc-800 bg-zinc-950/70 hover:border-zinc-700 hover:bg-zinc-900/80'}`}
-                            >
-                              <span className={`text-[10px] font-bold uppercase tracking-widest ${isActive ? 'text-orange-400' : 'text-zinc-400'}`}>
-                                {index + 1}
-                              </span>
-                              <span className="text-[10px] font-mono text-zinc-500">{delay}ms</span>
-                            </button>
-                          );
-                        })}
-                      </div>
+                  {liveAnimation && (
+                    <div className="shrink-0 border border-zinc-300 bg-white p-3 text-[10px] uppercase tracking-widest text-zinc-500">
+                      Live webcam preview
                     </div>
                   )}
                 </div>
