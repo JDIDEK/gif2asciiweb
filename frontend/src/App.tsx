@@ -262,7 +262,7 @@ const App: React.FC = () => {
   const handleLiveGesture = useCallback((gesture: LiveGesture) => {
     const now = Date.now();
     if (now < liveGestureCooldownRef.current) return;
-    liveGestureCooldownRef.current = now + 900;
+    liveGestureCooldownRef.current = now + 450;
 
     if (gesture === 'next_preset') {
       setRenderPresetId((current) => {
