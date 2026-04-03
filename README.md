@@ -1,6 +1,6 @@
-# FIG2TIG - GIF/Image to Colored ASCII
+# GIF2ASCII - GIF/Image to Colored ASCII
 
-FIG2TIG converts images and GIFs into colored ASCII art, provides real-time browser preview, and supports GIF export.
+GIF2ASCII converts images and GIFs into colored ASCII art, provides real-time browser preview, and supports GIF export.
 
 This project combines:
 - a React + TypeScript frontend (Vite)
